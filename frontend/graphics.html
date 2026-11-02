@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en" style="margin:0;padding:0;overflow:hidden;background:#000;width:100%;height:100%">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Graphics Output</title>
+    <!-- No CDN tags here on purpose. This is the ON-AIR renderer: a slow or blocked CDN used
+         to stall its parse, and a venue with no internet lost both the YouTube player and
+         every Latin display font mid-service. Fonts are now self-hosted via src/index.css,
+         and the YouTube IFrame API is injected on demand by MediaGraphic only when a YouTube
+         item is actually played. -->
+  </head>
+  <body style="margin:0;padding:0;overflow:hidden;background:#000;width:100%;height:100%">
+    <div id="root"></div>
+    <script type="module" src="/src/graphics-main.jsx"></script>
+  </body>
+</html>

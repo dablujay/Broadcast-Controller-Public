@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Packaged installers / build output (regenerable via npm run build:*)
+application packages/
+
+# Compiled frontend (Vite outDir, regenerable via npm run build:frontend)
+public_react/
+
+# macOS
+.DS_Store
+._*
+
+# Claude Code project config/session data
+.claude/
+
+# Logs
+*.log
