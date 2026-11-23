@@ -1001,7 +1001,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                 </div>
 
                 <div className={videoViewMode === 'grid' 
-                    ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 max-h-[240px] overflow-y-auto pr-2 custom-scrollbar" 
+                    ? "grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 max-h-[520px] overflow-y-auto pr-2 custom-scrollbar" 
                     : "flex flex-col gap-2 max-h-[240px] overflow-y-auto pr-2 custom-scrollbar"}>
                     {visiblePlaylistEntries.length === 0 ? (
                         <div className="text-xs text-slate-500 dark:text-slate-500 italic col-span-full text-center py-4">Library is empty</div>
@@ -1017,10 +1017,10 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                                     onDragOver={(e) => onDragOver(e, idx)}
                                     onDragEnd={onDragEnd}
                                     onClick={() => playPlaylistItem(item)} 
-                                    className={`surface-muted group relative flex cursor-grab overflow-hidden rounded-lg transition active:cursor-grabbing ${isThisPlaying && isPlaying ? 'border-indigo-500 ring-2 ring-indigo-500/30' : 'hover:border-indigo-500/50'} ${draggedIdx === idx ? 'opacity-50 ring-2 ring-indigo-500/20' : ''} ${videoViewMode === 'grid' ? 'aspect-video flex-col' : 'h-16 shrink-0 flex-row items-center'}`}
+                                    className={`surface-muted group relative flex cursor-grab overflow-hidden rounded-lg transition active:cursor-grabbing ${isThisPlaying && isPlaying ? 'border-indigo-500 ring-2 ring-indigo-500/30' : 'hover:border-indigo-500/50'} ${draggedIdx === idx ? 'opacity-50 ring-2 ring-indigo-500/20' : ''} ${videoViewMode === 'grid' ? 'aspect-video flex-col' : 'h-20 shrink-0 flex-row items-center'}`}
                                 >
                                     {/* Thumbnail */}
-                                    <div className={videoViewMode === 'grid' ? "w-full h-full relative" : "w-28 h-full relative flex-shrink-0 bg-black"}>
+                                    <div className={videoViewMode === 'grid' ? "w-full h-full relative" : "w-36 h-full relative flex-shrink-0 bg-black"}>
                                         {item.type === 'youtube' ? (
                                             <img 
                                                 src={`https://img.youtube.com/vi/${item.id}/mqdefault.jpg`} 
@@ -1045,7 +1045,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                                             </div>
                                         )}
                                         {/* Type Badge on Thumbnail */}
-                                        <div className={`absolute ${videoViewMode === 'grid' ? 'top-1 left-1' : 'top-1 left-1'} bg-black/60 backdrop-blur-md text-white text-[8px] font-mono px-1.5 py-0.5 rounded border border-white/20 flex items-center gap-1`}>
+                                        <div className={`absolute ${videoViewMode === 'grid' ? 'top-1 left-1' : 'top-1 left-1'} bg-black/60 backdrop-blur-md text-white text-[10px] font-mono px-1.5 py-0.5 rounded border border-white/20 flex items-center gap-1`}>
                                             {item.type === 'youtube' ? <Play className="w-2 h-2 text-red-500 fill-red-500" /> : item.type === 'webpage' ? <Globe className="w-2 h-2 text-cyan-500" /> : <Film className="w-2 h-2 text-blue-500" />}
                                             {visibleIdx + 1}
                                         </div>
@@ -1059,7 +1059,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                                     {/* Overlay Title (Grid) or Content (List) */}
                                     {videoViewMode === 'grid' ? (
                                         <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-2">
-                                            <p className="text-[9px] text-white font-medium truncate">{getItemTitle(item)}</p>
+                                            <p className="text-xs text-white font-medium truncate">{getItemTitle(item)}</p>
                                         </div>
                                     ) : (
                                         <div className="flex-1 px-3 py-2 flex flex-col justify-center min-w-0 pr-20">
@@ -1340,7 +1340,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                 </div>
 
                 <div className={photoViewMode === 'grid'
-                    ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 max-h-[240px] overflow-y-auto pr-2 custom-scrollbar"
+                    ? "grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 max-h-[520px] overflow-y-auto pr-2 custom-scrollbar"
                     : "flex flex-col gap-2 max-h-[240px] overflow-y-auto pr-2 custom-scrollbar"}>
                     {visiblePhotoEntries.length === 0 ? (
                         <div className="text-xs text-slate-500 italic col-span-full text-center py-6">
@@ -1355,10 +1355,10 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                                 onDragOver={(e) => onPhotoDragOver(e, idx)}
                                 onDragEnd={onPhotoDragEnd}
                                 onClick={() => { setIsPhotoLive(true); playPhotoAtIndex(idx); }}
-                                className={`surface-muted group relative flex cursor-grab overflow-hidden rounded-lg transition active:cursor-grabbing ${currentPhotoIdx === idx && isPhotoLive ? 'border-emerald-500 ring-2 ring-emerald-500/30' : 'hover:border-emerald-500/50'} ${draggedPhotoIdx === idx ? 'opacity-50 ring-2 ring-emerald-500/20' : ''} ${photoViewMode === 'grid' ? 'aspect-video flex-col' : 'h-16 shrink-0 flex-row items-center'}`}
+                                className={`surface-muted group relative flex cursor-grab overflow-hidden rounded-lg transition active:cursor-grabbing ${currentPhotoIdx === idx && isPhotoLive ? 'border-emerald-500 ring-2 ring-emerald-500/30' : 'hover:border-emerald-500/50'} ${draggedPhotoIdx === idx ? 'opacity-50 ring-2 ring-emerald-500/20' : ''} ${photoViewMode === 'grid' ? 'aspect-video flex-col' : 'h-20 shrink-0 flex-row items-center'}`}
                             >
                                 {/* Thumbnail */}
-                                <div className={photoViewMode === 'grid' ? "w-full h-full relative" : "w-28 h-full relative flex-shrink-0 bg-black"}>
+                                <div className={photoViewMode === 'grid' ? "w-full h-full relative" : "w-36 h-full relative flex-shrink-0 bg-black"}>
                                     {item.type === 'photo' ? (
                                         <img
                                             src={item.mediaId ? authUrl('/local-image', { mediaId: item.mediaId }) : undefined}
@@ -1373,7 +1373,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                                     )}
 
                                     {/* Index Badge */}
-                                    <div className="absolute top-1 left-1 bg-black/60 backdrop-blur-md text-white text-[8px] font-mono px-1.5 py-0.5 rounded border border-white/20">
+                                    <div className="absolute top-1 left-1 bg-black/60 backdrop-blur-md text-white text-[10px] font-mono px-1.5 py-0.5 rounded border border-white/20">
                                         {visibleIdx + 1}
                                     </div>
                                 </div>
@@ -1381,7 +1381,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                                 {/* Overlay Title (Grid) or Content (List) */}
                                 {photoViewMode === 'grid' ? (
                                     <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-2">
-                                        <p className="text-[9px] text-white font-medium truncate">{item.name}</p>
+                                        <p className="text-xs text-white font-medium truncate">{item.name}</p>
                                     </div>
                                 ) : (
                                     <div className="flex-1 px-3 py-2 flex flex-col justify-center min-w-0 pr-20">

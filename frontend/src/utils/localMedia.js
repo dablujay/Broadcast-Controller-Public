@@ -18,19 +18,23 @@ export async function registerLocalMedia(filePath, type = 'local') {
     return result.media;
 }
 
-// Re-registers any local/photo item that has a path but no usable mediaId. Playlists saved
-// before mediaId existed, and every playlist restored after a restart, land here. Items whose
-// file has since moved or been deleted keep their missing id and simply won't play, which is
-// the same outcome as before and better than dropping the operator's playlist entry.
+// Re-registers every local/photo item that has a path. A saved mediaId is never trusted:
+// ids die with the app run that issued them, but they are persisted alongside the playlist,
+// so after a restart every restored item carries a dead id. Skipping items that "already
+// have" an id is what made photo thumbnails vanish after a relaunch. Registering is cheap —
+// the server hands back the existing id when the path is already registered this run.
+// Items whose file has since moved or been deleted keep their old entry and simply won't
+// play, which is better than dropping the operator's playlist entry.
 export async function ensureMediaIds(items) {
     if (!Array.isArray(items) || items.length === 0) return items;
 
     let changed = false;
     const resolved = await Promise.all(items.map(async (item) => {
-        if (!item || item.mediaId || !item.path) return item;
+        if (!item || !item.path) return item;
         if (item.type !== 'local' && item.type !== 'photo') return item;
         try {
             const media = await registerLocalMedia(item.path, item.type);
+            if (media.mediaId === item.mediaId && (media.path || item.path) === item.path) return item;
             changed = true;
             return { ...item, mediaId: media.mediaId, path: media.path || item.path };
         } catch {
