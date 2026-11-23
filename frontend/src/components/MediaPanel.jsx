@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { Video, Play, Film, Trash2, GripVertical, Image as ImageIcon, Layout, Monitor, Trash, Grid, List, Globe, Folder, Upload, Type, X, Clock } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Pencil, ListVideo, Play, Pause, Film, Trash2, Layout, Monitor, Grid, List, Globe, Folder, Upload, Type, X, Clock, Plus, Search, ChevronDown, MoreHorizontal, SkipBack, SkipForward, Repeat, Volume2, VolumeX } from 'lucide-react';
 import { authUrl } from '../auth';
 import { ensureMediaIds, registerLocalMedia } from '../utils/localMedia';
 import { isCanvaUrl, normalizeCanvaUrl, resolveDeckUrl } from '../utils/presentation';
@@ -14,17 +15,42 @@ const SCHEDULED_PLAYS_KEY = 'bc_scheduled_plays_v1';
 const VIEW_MODE_KEY = 'bc_media_view_mode';
 const MEDIA_FOLDERS_KEY = 'bc_media_folders_v1';
 const ACTIVE_FOLDER_KEY = 'bc_media_active_folder_v1';
-// The photo library keeps its own folders rather than sharing the video ones: the
-// two libraries are filtered independently on screen, so a shared folder set would
-// mean picking a folder for photos silently re-filters the videos above it.
-const PHOTO_VIEW_MODE_KEY = 'bc_photo_view_mode';
+// Legacy key: photos now share the video folders (see mergeFolderLists below).
 const PHOTO_FOLDERS_KEY = 'bc_photo_folders_v1';
-const ACTIVE_PHOTO_FOLDER_KEY = 'bc_photo_active_folder_v1';
 const DEFAULT_FOLDER_ID = 'default';
 const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'webm', 'mkv']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
 
 const DEFAULT_FOLDERS = [{ id: DEFAULT_FOLDER_ID, name: 'Unsorted' }];
+// Display order of the combined (videos + photos) library, as stable item keys.
+const LIBRARY_ORDER_KEY = 'bc_media_library_order_v1';
+const videoLibraryKey = (item) => `v:${item.type}:${item.type === 'youtube' ? item.id : item.path}`;
+const photoLibraryKey = (item) => `p:${item.type}:${item.path}`;
+
+// Videos and photos used to keep separate folder lists. They now share one: photo folders
+// are folded into the video folders by name (or added), and photo items re-pointed at the
+// shared folder. Safe to run on every load — already-merged data comes back unchanged.
+const mergeFolderLists = (mediaFolders, photoFolders, photos) => {
+    const folders = [...mediaFolders];
+    if (!folders.some(f => f.id === DEFAULT_FOLDER_ID)) folders.unshift(DEFAULT_FOLDERS[0]);
+    const idMap = new Map();
+    for (const pf of photoFolders) {
+        const name = (pf.name || '').trim().toLowerCase();
+        const match = folders.find(f => f.id === pf.id || (f.name || '').trim().toLowerCase() === name);
+        if (match) idMap.set(pf.id, match.id);
+        else { folders.push(pf); idMap.set(pf.id, pf.id); }
+    }
+    const known = new Set(folders.map(f => f.id));
+    let changed = false;
+    const remapped = photos.map(p => {
+        const fid = p.folderId || DEFAULT_FOLDER_ID;
+        const target = known.has(fid) ? fid : (idMap.get(fid) || DEFAULT_FOLDER_ID);
+        if (target === fid) return p;
+        changed = true;
+        return { ...p, folderId: target };
+    });
+    return { folders, photos: changed ? remapped : photos };
+};
 
 const getFileName = (filePath = '') => filePath.split(/[/\\]/).pop() || 'Local file';
 const getExtension = (filePath = '') => getFileName(filePath).split('.').pop()?.toLowerCase() || '';
@@ -32,21 +58,17 @@ const isVideoPath = (filePath = '') => VIDEO_EXTENSIONS.has(getExtension(filePat
 const isImagePath = (filePath = '') => IMAGE_EXTENSIONS.has(getExtension(filePath));
 const getFolderIdForNewItem = (activeFolderId) => activeFolderId === 'all' ? DEFAULT_FOLDER_ID : activeFolderId;
 
-export default function MediaPanel({ socket, showParticleOverlayControls = false }) {
+export default function MediaPanel({ socket, showParticleOverlayControls = false, isActive = true }) {
     const [playlist, setPlaylist] = useState([]);
     const [photoPlaylist, setPhotoPlaylist] = useState([]);
 
     const [youtubeUrl, setYoutubeUrl] = useState('');
     const [youtubePlaylistUrl, setYoutubePlaylistUrl] = useState('');
     const [playlistLimit, setPlaylistLimit] = useState(''); // newest N to fetch; blank = all
-    const [selectedLocalPath, setSelectedLocalPath] = useState('');
-    const [localFileName, setLocalFileName] = useState('No file selected');
     const [webpageUrl, setWebpageUrl] = useState('');
     
     const [canvaUrl, setCanvaUrl] = useState('');
     const [canvaName, setCanvaName] = useState('');
-    const [selectedPhotoPath, setSelectedPhotoPath] = useState('');
-    const [photoFileName, setPhotoFileName] = useState('No photos selected');
 
     const [mediaData, setMediaData] = useState(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -98,14 +120,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
         return localStorage.getItem(ACTIVE_FOLDER_KEY) || 'all';
     });
     const [newFolderName, setNewFolderName] = useState('');
-    const [photoViewMode, setPhotoViewMode] = useState(() => {
-        return localStorage.getItem(PHOTO_VIEW_MODE_KEY) || 'grid';
-    });
-    const [photoFolders, setPhotoFolders] = useState(DEFAULT_FOLDERS);
-    const [activePhotoFolderId, setActivePhotoFolderId] = useState(() => {
-        return localStorage.getItem(ACTIVE_PHOTO_FOLDER_KEY) || 'all';
-    });
-    const [newPhotoFolderName, setNewPhotoFolderName] = useState('');
     const [isDropActive, setIsDropActive] = useState(false);
     const [isImportingDrop, setIsImportingDrop] = useState(false);
     const seekTrackRef = useRef(null);
@@ -120,11 +134,15 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
     // then swap in the registered version.
     useEffect(() => deferUntilIdle(() => {
         const savedPlaylist = readLocalStorageArraySafe(MEDIA_PLAYLIST_KEY);
-        const savedPhotos = readLocalStorageArraySafe(PHOTO_PLAYLIST_KEY);
+        const merged = mergeFolderLists(
+            readLocalStorageArraySafe(MEDIA_FOLDERS_KEY, DEFAULT_FOLDERS),
+            readLocalStorageArraySafe(PHOTO_FOLDERS_KEY, DEFAULT_FOLDERS),
+            readLocalStorageArraySafe(PHOTO_PLAYLIST_KEY)
+        );
+        const savedPhotos = merged.photos;
         setPlaylist(savedPlaylist);
         setPhotoPlaylist(savedPhotos);
-        setMediaFolders(readLocalStorageArraySafe(MEDIA_FOLDERS_KEY, DEFAULT_FOLDERS));
-        setPhotoFolders(readLocalStorageArraySafe(PHOTO_FOLDERS_KEY, DEFAULT_FOLDERS));
+        setMediaFolders(merged.folders);
         setScheduledPlays(readLocalStorageArraySafe(SCHEDULED_PLAYS_KEY));
 
         ensureMediaIds(savedPlaylist)
@@ -169,29 +187,17 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
     }, [videoViewMode]);
 
     useDebouncedLocalStorageEffect(MEDIA_FOLDERS_KEY, mediaFolders);
-    useDebouncedLocalStorageEffect(PHOTO_FOLDERS_KEY, photoFolders);
+    // Photos share the video folders now; keep the old key in step so nothing re-splits them.
+    useDebouncedLocalStorageEffect(PHOTO_FOLDERS_KEY, mediaFolders);
 
     useEffect(() => {
         localStorage.setItem(ACTIVE_FOLDER_KEY, activeFolderId);
     }, [activeFolderId]);
 
-    useEffect(() => {
-        localStorage.setItem(PHOTO_VIEW_MODE_KEY, photoViewMode);
-    }, [photoViewMode]);
-
-    useEffect(() => {
-        localStorage.setItem(ACTIVE_PHOTO_FOLDER_KEY, activePhotoFolderId);
-    }, [activePhotoFolderId]);
-
     const activeFolderExists = activeFolderId === 'all' || mediaFolders.some(folder => folder.id === activeFolderId);
     useEffect(() => {
         if (!activeFolderExists) setActiveFolderId('all');
     }, [activeFolderExists]);
-
-    const activePhotoFolderExists = activePhotoFolderId === 'all' || photoFolders.some(folder => folder.id === activePhotoFolderId);
-    useEffect(() => {
-        if (!activePhotoFolderExists) setActivePhotoFolderId('all');
-    }, [activePhotoFolderExists]);
 
     // Socket events for progress
     useEffect(() => {
@@ -304,18 +310,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
     const currentPlaylistIndex = playlist.findIndex(item => isSameMediaItem(item, mediaData));
     const currentPlaylistItem = currentPlaylistIndex >= 0 ? playlist[currentPlaylistIndex] : mediaData;
     const effectiveDuration = duration || currentPlaylistItem?.duration || mediaData?.duration || 0;
-    const visiblePlaylistEntries = playlist
-        .map((item, index) => ({ item, index }))
-        .filter(({ item }) => activeFolderId === 'all' || (item.folderId || DEFAULT_FOLDER_ID) === activeFolderId);
-
-    // Carries the real playlist index alongside each visible row, so removing,
-    // reordering, playing and re-foldering all still address the right item while a
-    // folder filter is on. Items saved before folders existed have no folderId and
-    // fall into Unsorted.
-    const visiblePhotoEntries = photoPlaylist
-        .map((item, index) => ({ item, index }))
-        .filter(({ item }) => activePhotoFolderId === 'all' || (item.folderId || DEFAULT_FOLDER_ID) === activePhotoFolderId);
-
     const createVideoThumbnail = (video) => {
         const canvas = document.createElement('canvas');
         const sourceWidth = video.videoWidth || 320;
@@ -383,15 +377,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
         setMediaFolders(prev => [...prev, { id, name }]);
         setActiveFolderId(id);
         setNewFolderName('');
-    };
-
-    const addPhotoFolder = () => {
-        const name = newPhotoFolderName.trim();
-        if (!name) return;
-        const id = `photo-folder-${Date.now()}`;
-        setPhotoFolders(prev => [...prev, { id, name }]);
-        setActivePhotoFolderId(id);
-        setNewPhotoFolderName('');
     };
 
     const updatePhotoItem = (index, patch) => {
@@ -511,34 +496,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
         }
     };
 
-    const handleBrowseLocal = async () => {
-        if (window.broadcastAPI) {
-            try {
-                const filePath = await window.broadcastAPI.selectLocalVideo();
-                if (filePath) {
-                    setSelectedLocalPath(filePath);
-                    const fileName = filePath.split(/[/\\]/).pop();
-                    setLocalFileName(fileName);
-                }
-            } catch (err) {
-                console.error("Electron IPC Error", err);
-                alert("Error interacting with file system.");
-            }
-        } else {
-            alert("Native file browsing requires running the Electron app.");
-            // Fallback for browser (would need an input[type="file"] returning a blob URL or similar)
-        }
-    };
-
-    const handleAddLocal = async () => {
-        if (!selectedLocalPath) {
-            alert("Please browse and select a local file first.");
-            return;
-        }
-        const item = await createLocalVideoItem(selectedLocalPath);
-        setPlaylist(prev => [item, ...prev]);
-    };
-
     const handleAddWebpage = () => {
         let url = webpageUrl.trim();
         if (!url) { alert("Please enter a webpage URL."); return; }
@@ -561,31 +518,15 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
         setPlaylist(prev => prev.filter((_, i) => i !== index));
     };
 
-    const clearVideoLibrary = () => {
-        if (playlist.length === 0) return;
-        if (!window.confirm('Clear all saved videos, YouTube items, and webpages from the video library?')) return;
-        setPlaylist([]);
-    };
-
     const playPlaylistItem = (item) => {
         if (!socket) return;
         const timestamp = Date.now();
         const payload = { ...item, ts: timestamp };
         if (item.type === 'youtube') {
-            const ytUrl = `https://www.youtube.com/watch?v=${item.id}`;
-            setYoutubeUrl(ytUrl);
-            setSelectedLocalPath('');
-            setLocalFileName('No file selected');
             socket.emit('play_media', payload);
         } else if (item.type === 'local') {
-            setSelectedLocalPath(item.path);
-            setLocalFileName(item.name);
-            setYoutubeUrl('');
             socket.emit('play_media', payload);
         } else if (item.type === 'webpage') {
-            setYoutubeUrl('');
-            setSelectedLocalPath('');
-            setLocalFileName('No file selected');
             socket.emit('play_media', payload);
         }
         setMediaData(payload);
@@ -687,7 +628,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                 videoItems.push(await createLocalVideoItem(filePath, folderId));
             } else if (isImagePath(filePath)) {
                 const registered = await registerLocalMedia(filePath, 'photo');
-                photoItems.push({ type: 'photo', path: registered.path, mediaId: registered.mediaId, name: registered.name || getFileName(filePath), folderId: getFolderIdForNewItem(activePhotoFolderId) });
+                photoItems.push({ type: 'photo', path: registered.path, mediaId: registered.mediaId, name: registered.name || getFileName(filePath), folderId: getFolderIdForNewItem(activeFolderId) });
             } else {
                 skippedFiles.push(file.name || getFileName(filePath));
             }
@@ -702,40 +643,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
     };
 
     // --- PHOTO LIBRARY HANDLERS ---
-    const handleBrowsePhoto = async () => {
-        if (window.broadcastAPI) {
-            try {
-                const filePaths = await window.broadcastAPI.selectLocalPhoto();
-                if (filePaths && filePaths.length > 0) {
-                    setSelectedPhotoPath(filePaths);
-                    setPhotoFileName(filePaths.length === 1 ? filePaths[0].split(/[/\\]/).pop() : `${filePaths.length} photos selected`);
-                }
-            } catch (e) {
-                console.error(e);
-                alert("Error interacting with file system.");
-            }
-        } else {
-            alert("Native photo browsing requires running the Electron app.");
-        }
-    };
-
-    const handleAddPhoto = async () => {
-        if (!selectedPhotoPath || selectedPhotoPath.length === 0) return;
-        
-        const folderId = getFolderIdForNewItem(activePhotoFolderId);
-        const newItems = Array.isArray(selectedPhotoPath)
-            ? await Promise.all(selectedPhotoPath.map(async p => {
-                const registered = await registerLocalMedia(p, 'photo');
-                return { type: 'photo', path: registered.path, mediaId: registered.mediaId, name: registered.name || p.split(/[/\\]/).pop(), folderId };
-            }))
-            : [await registerLocalMedia(selectedPhotoPath, 'photo').then(registered => ({ type: 'photo', path: registered.path, mediaId: registered.mediaId, name: registered.name || photoFileName, folderId }))];
-        
-        const newPlaylist = [...photoPlaylist, ...newItems];
-        setPhotoPlaylist(newPlaylist);
-        setSelectedPhotoPath('');
-        setPhotoFileName('No photos selected');
-    };
-
     const handleAddCanva = async () => {
         if (!canvaUrl) return;
         let url = canvaUrl.trim();
@@ -761,7 +668,7 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
         }
         url = normalizeCanvaUrl(resolved.url);
 
-        const newItem = { type: 'canva', path: url, name: canvaName || 'Canva Presentation', folderId: getFolderIdForNewItem(activePhotoFolderId) };
+        const newItem = { type: 'canva', path: url, name: canvaName || 'Canva Presentation', folderId: getFolderIdForNewItem(activeFolderId) };
         const newPlaylist = [...photoPlaylist, newItem];
         setPhotoPlaylist(newPlaylist);
         setCanvaUrl('');
@@ -773,13 +680,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
         const newPlaylist = photoPlaylist.filter((_, i) => i !== index);
         setPhotoPlaylist(newPlaylist);
         if (currentPhotoIdx === index) stopPhotoOutput();
-    };
-
-    const clearPhotoLibrary = () => {
-        if (photoPlaylist.length === 0) return;
-        if (!window.confirm('Clear all saved photos and Canva slides from this library?')) return;
-        setPhotoPlaylist([]);
-        stopPhotoOutput();
     };
 
     const stopPhotoOutput = () => {
@@ -821,53 +721,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
         }
         return () => clearTimeout(timer);
     }, [isPhotoLive, photoAutoNext, photoLoop, photoInterval, currentPhotoIdx, photoPlaylist]);
-
-    // Drag and Drop handlers for Media
-    const [draggedIdx, setDraggedIdx] = useState(null);
-
-    const onDragStart = (e, index) => {
-        setDraggedIdx(index);
-        e.dataTransfer.effectAllowed = 'move';
-    };
-
-    const onDragOver = (e, index) => {
-        e.preventDefault();
-        if (draggedIdx === null || draggedIdx === index) return;
-        const newPlaylist = [...playlist];
-        const item = newPlaylist[draggedIdx];
-        newPlaylist.splice(draggedIdx, 1);
-        newPlaylist.splice(index, 0, item);
-        setDraggedIdx(index);
-        setPlaylist(newPlaylist);
-    };
-
-    const onDragEnd = () => {
-        setDraggedIdx(null);
-    };
-
-    // Drag and Drop handlers for Photos
-    const [draggedPhotoIdx, setDraggedPhotoIdx] = useState(null);
-
-    const onPhotoDragStart = (e, index) => {
-        setDraggedPhotoIdx(index);
-        e.dataTransfer.effectAllowed = 'move';
-    };
-
-    const onPhotoDragOver = (e, index) => {
-        e.preventDefault();
-        if (draggedPhotoIdx === null || draggedPhotoIdx === index) return;
-        const newPlaylist = [...photoPlaylist];
-        const item = newPlaylist[draggedPhotoIdx];
-        newPlaylist.splice(draggedPhotoIdx, 1);
-        newPlaylist.splice(index, 0, item);
-        setDraggedPhotoIdx(index);
-        setPhotoPlaylist(newPlaylist);
-    };
-
-    const onPhotoDragEnd = () => {
-        setDraggedPhotoIdx(null);
-    };
-
 
     const handleStopClear = () => {
         socket?.emit('stop_media');
@@ -935,539 +788,340 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
 
     const progressPercent = effectiveDuration ? Math.min(Math.max((currentTime / effectiveDuration) * 100, 0), 100) : 0;
 
+    // ---- Unified, folder-first library (redesign) ----------------------------------------
+    // Videos and photos still live in their own arrays (playback, Run of Show and schedules
+    // read those), but they are shown as ONE library: one set of folders, one order.
+    const [addMenuOpen, setAddMenuOpen] = useState(false);
+    const [addMode, setAddMode] = useState(null);
+    const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+    const [showOverlays, setShowOverlays] = useState(false);
+    const [showNewFolderInput, setShowNewFolderInput] = useState(false);
+    const [librarySearch, setLibrarySearch] = useState('');
+    const [libraryOrder, setLibraryOrder] = useState(() => readLocalStorageArraySafe(LIBRARY_ORDER_KEY));
+    const [draggedKey, setDraggedKey] = useState(null);
+    const [dropFolderId, setDropFolderId] = useState(null);
+    const [draggedFolderId, setDraggedFolderId] = useState(null);
+    const [renamingFolderId, setRenamingFolderId] = useState(null);
+    const [renameDraft, setRenameDraft] = useState('');
+    const [lastLiveKind, setLastLiveKind] = useState(null);
+    const addMenuRef = useRef(null);
+    const moreMenuRef = useRef(null);
+    // The live controls render into a slot under the Live Preview (see App.jsx), so they
+    // sit in one fixed place next to the picture they control.
+    const [dockEl, setDockEl] = useState(null);
+    useEffect(() => { setDockEl(document.getElementById('bc-media-dock')); }, []);
+
+    useDebouncedLocalStorageEffect(LIBRARY_ORDER_KEY, libraryOrder);
+
+    useEffect(() => {
+        if (!addMenuOpen && !moreMenuOpen) return undefined;
+        const onPointerDown = (e) => {
+            if (addMenuRef.current && !addMenuRef.current.contains(e.target)) setAddMenuOpen(false);
+            if (moreMenuRef.current && !moreMenuRef.current.contains(e.target)) setMoreMenuOpen(false);
+        };
+        const onKeyDown = (e) => { if (e.key === 'Escape') { setAddMenuOpen(false); setMoreMenuOpen(false); } };
+        document.addEventListener('mousedown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [addMenuOpen, moreMenuOpen]);
+
+    // Every item in one list, in the operator's order. Items not in the saved order yet
+    // (just added) go to the top, newest first.
+    const orderRank = new Map(libraryOrder.map((key, i) => [key, i]));
+    const libraryEntries = [
+        ...playlist.map((item, index) => ({ kind: 'video', item, index, key: videoLibraryKey(item) })),
+        ...photoPlaylist.map((item, index) => ({ kind: 'photo', item, index, key: photoLibraryKey(item) }))
+    ].sort((a, b) => (orderRank.has(a.key) ? orderRank.get(a.key) : -1) - (orderRank.has(b.key) ? orderRank.get(b.key) : -1));
+
+    const searchQuery = librarySearch.trim().toLowerCase();
+    const entryTitle = (entry) => entry.kind === 'video' ? getItemTitle(entry.item) : (entry.item.name || 'Photo');
+    const shownEntries = libraryEntries.filter(entry =>
+        (activeFolderId === 'all' || (entry.item.folderId || DEFAULT_FOLDER_ID) === activeFolderId)
+        && (!searchQuery || entryTitle(entry).toLowerCase().includes(searchQuery)));
+    const folderCount = (folderId) => libraryEntries.filter(entry => (entry.item.folderId || DEFAULT_FOLDER_ID) === folderId).length;
+
+    // Reordering the combined list also re-sorts the two underlying arrays, so "next" and
+    // auto-advance follow the order the operator sees.
+    const applyLibraryOrder = (keys) => {
+        setLibraryOrder(keys);
+        const rank = new Map(keys.map((key, i) => [key, i]));
+        const byRank = (keyFn) => (a, b) => (rank.get(keyFn(a)) ?? -1) - (rank.get(keyFn(b)) ?? -1);
+        setPlaylist(prev => [...prev].sort(byRank(videoLibraryKey)));
+        const livePhotoKey = currentPhotoIdx >= 0 && photoPlaylist[currentPhotoIdx] ? photoLibraryKey(photoPlaylist[currentPhotoIdx]) : null;
+        const sortedPhotos = [...photoPlaylist].sort(byRank(photoLibraryKey));
+        setPhotoPlaylist(sortedPhotos);
+        if (livePhotoKey) setCurrentPhotoIdx(sortedPhotos.findIndex(p => photoLibraryKey(p) === livePhotoKey));
+    };
+
+    const onEntryDragStart = (e, key) => {
+        setDraggedKey(key);
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', key);
+    };
+    const onEntryDragOver = (e, targetKey) => {
+        if (!draggedKey) return;
+        e.preventDefault();
+        if (draggedKey === targetKey) return;
+        const keys = libraryEntries.map(entry => entry.key);
+        const from = keys.indexOf(draggedKey);
+        const to = keys.indexOf(targetKey);
+        if (from < 0 || to < 0) return;
+        keys.splice(from, 1);
+        keys.splice(to, 0, draggedKey);
+        applyLibraryOrder(keys);
+    };
+    const onEntryDragEnd = () => { setDraggedKey(null); setDropFolderId(null); };
+
+    const moveEntryToFolder = (key, folderId) => {
+        const entry = libraryEntries.find(x => x.key === key);
+        if (!entry) return;
+        if (entry.kind === 'video') updatePlaylistItem(entry.index, { folderId });
+        else updatePhotoItem(entry.index, { folderId });
+    };
+
+    const deleteFolder = (folder) => {
+        if (folder.id === DEFAULT_FOLDER_ID) return;
+        const count = folderCount(folder.id);
+        const what = count === 0 ? 'It is empty.' : `Its ${count} item${count === 1 ? '' : 's'} will move to Unsorted — nothing is removed from the library.`;
+        if (!window.confirm(`Delete the folder "${folder.name}"? ${what}`)) return;
+        const unfile = (item) => item.folderId === folder.id ? { ...item, folderId: DEFAULT_FOLDER_ID } : item;
+        setPlaylist(prev => prev.map(unfile));
+        setPhotoPlaylist(prev => prev.map(unfile));
+        setMediaFolders(prev => prev.filter(f => f.id !== folder.id));
+        if (activeFolderId === folder.id) setActiveFolderId('all');
+    };
+
+    const clearWholeLibrary = () => {
+        const total = playlist.length + photoPlaylist.length;
+        if (total === 0) return;
+        if (!window.confirm(`Remove all ${total} items from the media library? Your folders stay, and the files on your computer are not touched. This can't be undone.`)) return;
+        setPlaylist([]);
+        setPhotoPlaylist([]);
+        stopPhotoOutput();
+    };
+
+    const playEntry = (entry) => {
+        if (entry.kind === 'video') {
+            setLastLiveKind('video');
+            playPlaylistItem(entry.item);
+        } else {
+            setLastLiveKind('photo');
+            setIsPhotoLive(true);
+            playPhotoAtIndex(entry.index);
+        }
+    };
+
+    const handlePlayPrev = () => {
+        if (playlist.length === 0) return;
+        const currentIndex = playlist.findIndex(item => isSameMediaItem(item, mediaData));
+        const prevIndex = currentIndex <= 0 ? playlist.length - 1 : currentIndex - 1;
+        playPlaylistItem(playlist[prevIndex]);
+    };
+
+    // One step: pick the file and it lands in the library (no separate "Add" click).
+    const addVideoFromComputer = async () => {
+        if (!window.broadcastAPI) { alert('Native file browsing requires running the Electron app.'); return; }
+        try {
+            const filePath = await window.broadcastAPI.selectLocalVideo();
+            if (!filePath) return;
+            const item = await createLocalVideoItem(filePath);
+            setPlaylist(prev => [item, ...prev]);
+        } catch (err) {
+            console.error('Could not add video', err);
+            alert('Could not add that video.');
+        }
+    };
+
+    const addPhotosFromComputer = async () => {
+        if (!window.broadcastAPI) { alert('Native photo browsing requires running the Electron app.'); return; }
+        try {
+            const filePaths = await window.broadcastAPI.selectLocalPhoto();
+            if (!filePaths || filePaths.length === 0) return;
+            const folderId = getFolderIdForNewItem(activeFolderId);
+            const newItems = await Promise.all(filePaths.map(async p => {
+                const registered = await registerLocalMedia(p, 'photo');
+                return { type: 'photo', path: registered.path, mediaId: registered.mediaId, name: registered.name || p.split(/[/\\]/).pop(), folderId };
+            }));
+            setPhotoPlaylist(prev => [...prev, ...newItems]);
+        } catch (err) {
+            console.error('Could not add photos', err);
+            alert('Could not add those photos.');
+        }
+    };
+
+    const chooseAddOption = (mode) => {
+        setAddMenuOpen(false);
+        if (mode === 'videoFile') addVideoFromComputer();
+        else if (mode === 'photoFile') addPhotosFromComputer();
+        else setAddMode(mode);
+    };
+
+    const commitNewFolder = () => {
+        addMediaFolder();
+        setShowNewFolderInput(false);
+    };
+
+    const renderEntryThumb = (entry) => {
+        const { item } = entry;
+        if (entry.kind === 'photo') {
+            if (item.type === 'photo') return <img src={item.mediaId ? authUrl('/local-image', { mediaId: item.mediaId }) : undefined} alt="" className="h-full w-full object-cover" />;
+            return <div className="flex h-full w-full items-center justify-center bg-purple-600/15"><Layout className="h-8 w-8 text-purple-400" /></div>;
+        }
+        if (item.type === 'youtube') return <img src={`https://img.youtube.com/vi/${item.id}/mqdefault.jpg`} alt="" className="h-full w-full object-cover" />;
+        if (item.type === 'webpage') return <div className="flex h-full w-full items-center justify-center bg-cyan-600/15"><Globe className="h-8 w-8 text-cyan-500" /></div>;
+        if (item.thumbnail) return <img src={item.thumbnail} alt="" className="h-full w-full object-cover" />;
+        return <div className="flex h-full w-full items-center justify-center bg-indigo-600/15"><Film className="h-8 w-8 text-indigo-400" /></div>;
+    };
+    const entryTypeLabel = (entry) => entry.kind === 'photo'
+        ? (entry.item.type === 'canva' ? 'Canva' : 'Photo')
+        : ({ local: 'Video', youtube: 'YouTube', webpage: 'Web page' }[entry.item.type] || 'Video');
+
+    const livePhoto = isPhotoLive && currentPhotoIdx >= 0 ? photoPlaylist[currentPhotoIdx] : null;
+    // Whatever is on air right now — the most recently started one if both are up.
+    const liveKind = (lastLiveKind === 'photo' && livePhoto) ? 'photo' : mediaData ? 'video' : livePhoto ? 'photo' : null;
+    const remainingTime = effectiveDuration ? Math.max(0, effectiveDuration - currentTime) : 0;
+    const viewMode = videoViewMode;
+    const setViewMode = setVideoViewMode;
+    const roundButtonClass = 'flex h-11 w-11 flex-none items-center justify-center rounded-full border border-slate-300 text-slate-700 transition hover:border-indigo-500 hover:text-indigo-500 active:scale-95 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200';
+    const addMenuItemClass = 'flex w-full flex-col items-start rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-slate-800 transition hover:bg-indigo-600/10 dark:text-slate-100';
+    const smallToggle = (active) => `h-9 whitespace-nowrap rounded-lg border px-1 text-[11px] font-bold uppercase tracking-normal transition ${active ? 'border-indigo-500 bg-indigo-600/15 text-indigo-600 dark:text-indigo-300' : 'border-slate-300 text-slate-600 hover:border-slate-400 dark:border-slate-700 dark:text-slate-300'}`;
+    const folderButtonClass = (active, isDrop) => `group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-[13px] transition ${isDrop ? 'bg-indigo-600 text-white ring-2 ring-indigo-400' : active ? 'bg-indigo-600/15 font-semibold text-indigo-700 dark:text-indigo-200' : 'text-slate-700 hover:bg-slate-500/10 dark:text-slate-300'}`;
+    // A folder row is a drop target for two different drags: a media tile (move the item
+    // into this folder) or another folder (reorder the folder list).
+    const folderDropProps = (folderId) => ({
+        onDragOver: (e) => {
+            if (draggedKey) { e.preventDefault(); setDropFolderId(folderId); return; }
+            if (draggedFolderId) {
+                e.preventDefault();
+                if (draggedFolderId === folderId) return;
+                setMediaFolders(prev => {
+                    const from = prev.findIndex(f => f.id === draggedFolderId);
+                    const to = prev.findIndex(f => f.id === folderId);
+                    if (from < 0 || to < 0) return prev;
+                    const next = [...prev];
+                    const [moved] = next.splice(from, 1);
+                    next.splice(to, 0, moved);
+                    return next;
+                });
+            }
+        },
+        onDragLeave: () => setDropFolderId(current => current === folderId ? null : current),
+        onDrop: (e) => {
+            if (draggedFolderId) { e.preventDefault(); setDraggedFolderId(null); return; }
+            if (!draggedKey) return;
+            e.preventDefault();
+            moveEntryToFolder(draggedKey, folderId);
+            setDraggedKey(null);
+            setDropFolderId(null);
+        }
+    });
+
+    const startRenameFolder = (folder) => {
+        setRenamingFolderId(folder.id);
+        setRenameDraft(folder.name);
+    };
+    const commitRenameFolder = () => {
+        const name = renameDraft.trim();
+        if (name && renamingFolderId) {
+            setMediaFolders(prev => prev.map(f => f.id === renamingFolderId ? { ...f, name } : f));
+        }
+        setRenamingFolderId(null);
+    };
+
     return (
-        <div className="grid grid-cols-1 2xl:grid-cols-[minmax(560px,1fr)_minmax(420px,0.85fr)] gap-4">
-            {/* MEDIA PLAYLIST */}
-            <div className="surface space-y-3 rounded-lg p-3 2xl:col-start-1 2xl:row-start-1">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b section-rule pb-2">
-                    <div className="flex items-center space-x-2">
-                        <Video className="w-4 h-4 text-indigo-500" />
-                        <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 uppercase tracking-[0.2em]">Video Library</h3>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                        <button
-                            onClick={clearVideoLibrary}
-                            disabled={playlist.length === 0}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-red-500/20 bg-red-600/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-red-600 transition hover:bg-red-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-red-600/10 disabled:hover:text-red-600"
-                            title="Clear Video Library"
-                        >
-                            <Trash2 className="w-3 h-3" />
-                            Clear
-                        </button>
-                        <div className="surface-muted flex items-center rounded-lg p-0.5">
-                            <button onClick={() => setVideoViewMode('grid')} className={`rounded-md p-1 transition ${videoViewMode === 'grid' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`} title="Grid View"><Grid className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => setVideoViewMode('list')} className={`rounded-md p-1 transition ${videoViewMode === 'list' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`} title="List View"><List className="w-3.5 h-3.5" /></button>
-                        </div>
-                        <button onClick={toggleLoop} className={`rounded px-2 py-1 text-[10px] font-bold transition ${loop ? 'bg-indigo-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                            LOOP: {loop ? 'ON' : 'OFF'}
-                        </button>
-                        <button onClick={toggleAutoNext} className={`rounded px-2 py-1 text-[10px] font-bold transition ${autoNext ? 'bg-indigo-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                            AUTO NEXT: {autoNext ? 'ON' : 'OFF'}
-                        </button>
-                    </div>
-                </div>
-                <div className="space-y-2">
-                    <div className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                            <button onClick={() => setActiveFolderId('all')} className={`rounded-lg border px-2.5 py-1 text-[10px] font-bold transition ${activeFolderId === 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                                All
-                            </button>
-                            {mediaFolders.map(folder => (
-                                <button key={folder.id} onClick={() => setActiveFolderId(folder.id)} className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[10px] font-bold transition ${activeFolderId === folder.id ? 'border-indigo-600 bg-indigo-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                                    <Folder className="w-3 h-3" />
-                                    {folder.name}
-                                </button>
-                            ))}
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <input type="text" value={newFolderName} onChange={e => setNewFolderName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addMediaFolder(); }} placeholder="New folder..."
-                                className="control-field w-40 px-2 py-1 text-[10px]" />
-                            <button onClick={addMediaFolder} className="control-button-muted px-2.5 py-1 text-[10px] font-bold">
-                                + Folder
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <div
-                    onDragEnter={(e) => { e.preventDefault(); setIsDropActive(true); }}
-                    onDragOver={(e) => { e.preventDefault(); setIsDropActive(true); }}
-                    onDragLeave={(e) => { e.preventDefault(); setIsDropActive(false); }}
-                    onDrop={handleMediaDrop}
-                    className={`flex items-center justify-center gap-2 rounded-lg border border-dashed p-3 text-xs transition ${isDropActive ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'surface-muted text-slate-500'}`}
-                >
-                    <Upload className="w-4 h-4" />
-                    <span className="font-medium">{isImportingDrop ? 'Importing media...' : 'Drop videos here, or drop photos to add them to the photo library'}</span>
-                </div>
-
-                <div className={videoViewMode === 'grid' 
-                    ? "grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 max-h-[520px] overflow-y-auto pr-2 custom-scrollbar" 
-                    : "flex flex-col gap-2 max-h-[240px] overflow-y-auto pr-2 custom-scrollbar"}>
-                    {visiblePlaylistEntries.length === 0 ? (
-                        <div className="text-xs text-slate-500 dark:text-slate-500 italic col-span-full text-center py-4">Library is empty</div>
-                    ) : (
-                        visiblePlaylistEntries.map(({ item, index: idx }, visibleIdx) => {
-                            const isThisPlaying = isSameMediaItem(item, mediaData);
-
-                            return (
-                                <div 
-                                    key={`${item.type}-${item.id || item.path}-${idx}`} 
-                                    draggable
-                                    onDragStart={(e) => onDragStart(e, idx)}
-                                    onDragOver={(e) => onDragOver(e, idx)}
-                                    onDragEnd={onDragEnd}
-                                    onClick={() => playPlaylistItem(item)} 
-                                    className={`surface-muted group relative flex cursor-grab overflow-hidden rounded-lg transition active:cursor-grabbing ${isThisPlaying && isPlaying ? 'border-indigo-500 ring-2 ring-indigo-500/30' : 'hover:border-indigo-500/50'} ${draggedIdx === idx ? 'opacity-50 ring-2 ring-indigo-500/20' : ''} ${videoViewMode === 'grid' ? 'aspect-video flex-col' : 'h-20 shrink-0 flex-row items-center'}`}
-                                >
-                                    {/* Thumbnail */}
-                                    <div className={videoViewMode === 'grid' ? "w-full h-full relative" : "w-36 h-full relative flex-shrink-0 bg-black"}>
-                                        {item.type === 'youtube' ? (
-                                            <img 
-                                                src={`https://img.youtube.com/vi/${item.id}/mqdefault.jpg`} 
-                                                alt={item.name}
-                                                className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition"
-                                            />
-                                        ) : item.type === 'webpage' ? (
-                                            <div className="w-full h-full bg-cyan-600/10 flex flex-col items-center justify-center p-2 text-center">
-                                                <Globe className="w-8 h-8 text-cyan-500 mb-1" />
-                                                <span className="text-[8px] font-bold text-cyan-400 uppercase tracking-tighter">Webpage</span>
-                                            </div>
-                                        ) : item.thumbnail ? (
-                                            <img
-                                                src={item.thumbnail}
-                                                alt={item.name}
-                                                className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition"
-                                            />
-                                        ) : (
-                                            <div className="w-full h-full bg-indigo-600/10 flex flex-col items-center justify-center p-2 text-center">
-                                                <Film className="w-8 h-8 text-indigo-500 mb-1" />
-                                                <span className="text-[8px] font-bold text-indigo-400 uppercase tracking-tighter">Local Video</span>
-                                            </div>
-                                        )}
-                                        {/* Type Badge on Thumbnail */}
-                                        <div className={`absolute ${videoViewMode === 'grid' ? 'top-1 left-1' : 'top-1 left-1'} bg-black/60 backdrop-blur-md text-white text-[10px] font-mono px-1.5 py-0.5 rounded border border-white/20 flex items-center gap-1`}>
-                                            {item.type === 'youtube' ? <Play className="w-2 h-2 text-red-500 fill-red-500" /> : item.type === 'webpage' ? <Globe className="w-2 h-2 text-cyan-500" /> : <Film className="w-2 h-2 text-blue-500" />}
-                                            {visibleIdx + 1}
-                                        </div>
-                                        {item.duration ? (
-                                            <div className="absolute bottom-1 right-1 bg-black/70 text-white text-[8px] font-mono px-1.5 py-0.5 rounded">
-                                                {formatMediaTime(item.duration)}
-                                            </div>
-                                        ) : null}
-                                    </div>
-
-                                    {/* Overlay Title (Grid) or Content (List) */}
-                                    {videoViewMode === 'grid' ? (
-                                        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-2">
-                                            <p className="text-xs text-white font-medium truncate">{getItemTitle(item)}</p>
-                                        </div>
-                                    ) : (
-                                        <div className="flex-1 px-3 py-2 flex flex-col justify-center min-w-0 pr-20">
-                                            <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 truncate" title={getItemTitle(item)}>{getItemTitle(item)}</p>
-                                            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mt-0.5">{item.type}{item.duration ? ` · ${formatMediaTime(item.duration)}` : ''}</p>
-                                            <select value={item.folderId || DEFAULT_FOLDER_ID} onClick={e => e.stopPropagation()} onChange={e => updatePlaylistItem(idx, { folderId: e.target.value })}
-                                                className="control-field mt-1 w-32 rounded px-1 py-0.5 text-[9px]">
-                                                {mediaFolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
-                                            </select>
-                                        </div>
-                                    )}
-
-                                    {videoViewMode === 'grid' && (
-                                        <select value={item.folderId || DEFAULT_FOLDER_ID} onClick={e => e.stopPropagation()} onChange={e => updatePlaylistItem(idx, { folderId: e.target.value })}
-                                            className="absolute bottom-7 left-2 max-w-[calc(100%-1rem)] bg-black/60 text-white border border-white/20 rounded px-1 py-0.5 text-[8px] outline-none opacity-0 group-hover:opacity-100 transition-opacity">
-                                            {mediaFolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
-                                        </select>
-                                    )}
-
-                                    {/* Drag Handle */}
-                                    <div className={`absolute ${videoViewMode === 'grid' ? 'top-1 right-1' : 'inset-y-0 right-10 flex items-center'} opacity-0 group-hover:opacity-100 transition-opacity`}>
-                                        <GripVertical className="w-4 h-4 text-slate-400 dark:text-slate-500" />
-                                    </div>
-
-                                    {/* Delete Button */}
-                                    <button 
-                                        onClick={(e) => { e.stopPropagation(); removePlaylistItem(idx, e); }} 
-                                        className={`absolute ${videoViewMode === 'grid' ? 'top-1 right-6' : 'inset-y-0 right-2 flex items-center h-fit my-auto'} p-1.5 bg-red-600 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity transform hover:scale-110 active:scale-95`}
-                                    >
-                                        <Trash2 className="w-3 h-3" />
-                                    </button>
-                                </div>
-                            );
-                        })
+        <div className="@container flex flex-col gap-4">
+            {/* ===== Header: search · view · overlays · ⋯ · Add ===== */}
+            <div className="flex items-center gap-2 @xl:gap-3">
+                <label className="control-field flex h-9 min-w-0 flex-1 items-center gap-2 px-3" style={{ maxWidth: '18rem' }}>
+                    <Search className="h-4 w-4 flex-none text-slate-400" />
+                    <input
+                        type="text"
+                        value={librarySearch}
+                        onChange={e => setLibrarySearch(e.target.value)}
+                        placeholder="Search all media"
+                        aria-label="Search all media"
+                        className="min-w-0 flex-1 bg-transparent text-sm outline-none"
+                    />
+                    {librarySearch && (
+                        <button onClick={() => setLibrarySearch('')} aria-label="Clear search" className="text-slate-400 hover:text-slate-600"><X className="h-4 w-4" /></button>
                     )}
-                </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 2xl:col-start-1 2xl:row-start-2">
-                {/* YouTube Input */}
-                <div className="surface-muted space-y-3 rounded-lg p-3">
-                    <div className="space-y-3">
-                        <div className="flex items-center space-x-2">
-                            <Play className="w-4 h-4 text-red-500 fill-red-500" />
-                            <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wide">Youtube</label>
-                        </div>
-                        <div className="flex space-x-2">
-                            <input type="text" value={youtubeUrl} onChange={e=>setYoutubeUrl(e.target.value)} placeholder="Video URL..." 
-                                className="control-field flex-1 px-3 py-1.5 text-sm" />
-                            <button onClick={handleAddYoutube} disabled={isFetchingYt} className="control-button-muted px-3 text-xs font-bold">
-                                {isFetchingYt ? '...' : '+ Video'}
-                            </button>
-                        </div>
-                    </div>
-                    <div className="space-y-3 border-t section-rule pt-2">
-                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">YouTube Playlist URL</label>
-                        <div className="flex space-x-2">
-                            <input type="text" value={youtubePlaylistUrl} onChange={e=>setYoutubePlaylistUrl(e.target.value)} placeholder="Playlist URL..."
-                                className="control-field flex-1 px-3 py-1.5 text-sm" />
-                            <input type="number" min="1" value={playlistLimit} onChange={e=>setPlaylistLimit(e.target.value)}
-                                title="Newest videos to fetch (leave blank for all)" placeholder="All"
-                                style={{ flex: '0 0 4rem', width: '4rem' }}
-                                className="control-field px-2 py-1.5 text-sm text-center" />
-                            <button onClick={handleAddYoutubePlaylist} disabled={isFetchingPlaylist} className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 rounded-lg font-bold transition">
-                                {isFetchingPlaylist ? '...' : '+ Playlist'}
-                            </button>
-                        </div>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">Fetches the newest videos first. Leave the count blank to load the whole playlist.</p>
-                    </div>
-                </div>
-
-                {/* Local File + Webpage Input */}
-                <div className="surface-muted space-y-3 rounded-lg p-3">
-                    <div className="flex items-center space-x-2">
-                        <Film className="w-4 h-4 text-blue-500" />
-                        <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wide">Local Video</label>
-                    </div>
-                    <div className="control-field flex items-center space-x-2 p-2">
-                        <button onClick={handleBrowseLocal} className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold py-1.5 px-3 rounded-md transition flex-none shadow-sm active:scale-95">
-                            Browse...
-                        </button>
-                        <span className="text-xs text-slate-600 dark:text-slate-400 truncate flex-1" title={selectedLocalPath || ''}>
-                            {localFileName}
-                        </span>
-                    </div>
-                    <button onClick={handleAddLocal} className="control-button-muted flex w-full items-center justify-center px-4 py-2 text-sm font-medium active:scale-95">
-                        + Add Local File to Playlist
+                </label>
+                <div className="ml-auto flex flex-none items-center gap-2">
+                    <button onClick={() => setShowOverlays(open => !open)} aria-pressed={showOverlays} title="Overlays (message, particles)" aria-label="Overlays"
+                        className={`flex h-9 items-center gap-2 rounded-lg border px-3 text-[13px] font-medium transition ${showOverlays ? 'border-indigo-500 bg-indigo-600/15 text-indigo-700 dark:text-indigo-200' : 'border-slate-300 text-slate-600 hover:border-slate-400 dark:border-slate-700 dark:text-slate-300'}`}>
+                        <Type className="h-4 w-4" />
+                        <span className="hidden @xl:inline">Overlays</span>
+                        {(messageOverlayEnabled || particlesEnabled) && <span className="h-2 w-2 rounded-full bg-emerald-500" aria-label="An overlay is on" />}
                     </button>
-
-                    <div className="space-y-2 border-t section-rule pt-2">
-                        <div className="flex items-center space-x-2">
-                            <Globe className="w-3.5 h-3.5 text-cyan-500" />
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Webpage URL</label>
-                        </div>
-                        <div className="flex space-x-2">
-                            <input type="text" value={webpageUrl} onChange={e => setWebpageUrl(e.target.value)} placeholder="https://example.com" 
-                                className="control-field flex-1 px-3 py-1.5 text-sm" />
-                            <button onClick={handleAddWebpage} className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-3 rounded-lg font-bold transition">
-                                + Add
-                            </button>
-                        </div>
+                    <div className="surface-muted flex items-center rounded-lg p-1">
+                        <button onClick={() => setViewMode('grid')} aria-label="Grid view" title="Grid view" className={`rounded-md p-1.5 transition ${viewMode === 'grid' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}><Grid className="h-4 w-4" /></button>
+                        <button onClick={() => setViewMode('list')} aria-label="List view" title="List view" className={`rounded-md p-1.5 transition ${viewMode === 'list' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}><List className="h-4 w-4" /></button>
                     </div>
-                </div>
-
-                {/* Scheduled Videos */}
-                <div className="surface-muted space-y-3 rounded-lg p-3">
-                    <div className="flex items-center space-x-2">
-                        <Clock className="w-4 h-4 text-amber-500" />
-                        <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wide">Scheduled Videos</label>
-                    </div>
-
-                    <div className="space-y-2">
-                        <select value={newScheduleIdx} onChange={e => setNewScheduleIdx(e.target.value)}
-                            className="control-field w-full px-3 py-1.5 text-sm">
-                            <option value="">Choose a video…</option>
-                            {playlist.map((item, i) => (
-                                <option key={i} value={i}>{getItemTitle(item)}</option>
-                            ))}
-                        </select>
-                        <input type="time" value={newScheduleTime} onChange={e => setNewScheduleTime(e.target.value)}
-                            className="control-field w-full px-3 py-1.5 text-sm" />
-                        <div className="flex overflow-hidden rounded-lg border border-slate-500/20">
-                            {[['once', 'Once'], ['daily', 'Daily'], ['weekly', 'Days']].map(([mode, label]) => (
-                                <button key={mode} onClick={() => setNewScheduleMode(mode)}
-                                    className={`flex-1 px-3 py-1.5 text-xs font-bold transition ${newScheduleMode === mode ? 'bg-amber-500 text-white' : 'bg-slate-500/10 text-slate-500'}`}>{label}</button>
-                            ))}
-                        </div>
-                        {newScheduleMode === 'weekly' && (
-                            <div className="flex justify-between gap-1">
-                                {WEEKDAY_OPTIONS.map(([label, day], i) => {
-                                    const active = newScheduleDays.includes(day);
-                                    return (
-                                        <button key={i} onClick={() => toggleNewScheduleDay(day)}
-                                            title={['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day]}
-                                            className={`h-7 flex-1 rounded text-xs font-bold transition ${active ? 'bg-amber-500 text-white' : 'bg-slate-500/10 text-slate-500 hover:bg-slate-500/20'}`}>
-                                            {label}
-                                        </button>
-                                    );
-                                })}
+                    <div className="relative" ref={moreMenuRef}>
+                        <button onClick={() => setMoreMenuOpen(open => !open)} aria-haspopup="menu" aria-expanded={moreMenuOpen} aria-label="Library options" title="Library options"
+                            className="surface-muted flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition hover:text-slate-800 dark:hover:text-slate-200">
+                            <MoreHorizontal className="h-5 w-5" />
+                        </button>
+                        {moreMenuOpen && (
+                            <div role="menu" className="surface-raised absolute right-0 top-12 z-30 w-72 rounded-xl p-1.5 shadow-2xl">
+                                <button role="menuitem" onClick={() => { setMoreMenuOpen(false); setAddMode('schedule'); }} className={addMenuItemClass}>
+                                    Scheduled videos…
+                                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">Auto-play a video at a set time</span>
+                                </button>
+                                <div className="section-rule my-1 h-px" />
+                                <button role="menuitem"
+                                    onClick={() => { setMoreMenuOpen(false); clearWholeLibrary(); }}
+                                    disabled={playlist.length + photoPlaylist.length === 0}
+                                    className="flex w-full flex-col items-start rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-red-600 transition hover:bg-red-600/10 disabled:cursor-not-allowed disabled:opacity-40">
+                                    Clear entire library…
+                                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">Removes every item. You'll be asked to confirm.</span>
+                                </button>
                             </div>
                         )}
-                        <button onClick={addSchedule} disabled={newScheduleIdx === '' || !newScheduleTime || (newScheduleMode === 'weekly' && newScheduleDays.length === 0)}
-                            className="control-button-muted flex w-full items-center justify-center px-4 py-2 text-sm font-medium active:scale-95 disabled:cursor-not-allowed disabled:opacity-40">
-                            + Schedule
-                        </button>
                     </div>
-
-                    {scheduledPlays.length > 0 ? (
-                        <div className="space-y-1.5 border-t section-rule pt-2">
-                            {scheduledPlays.map(s => {
-                                const { secondsUntil } = scheduleTick(s, scheduleNow);
-                                const done = s.mode === 'once' && !!s.lastFiredDate;
-                                return (
-                                    <div key={s.id} className="flex items-center gap-2 rounded-md bg-slate-500/5 px-2 py-1.5">
-                                        <div className="min-w-0 flex-1">
-                                            <div className="truncate text-sm text-slate-700 dark:text-slate-200">{getItemTitle(s.item)}</div>
-                                            <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                                                <span className="font-semibold">{formatClock12(s.time)}</span>
-                                                <span className="rounded bg-slate-500/15 px-1 py-0.5 uppercase tracking-wide">{s.mode === 'daily' ? 'Daily' : s.mode === 'weekly' ? formatDays(s.days) : 'Once'}</span>
-                                                <span>{done ? 'Done' : (s.enabled ? formatCountdown(secondsUntil) : 'Off')}</span>
-                                            </div>
-                                        </div>
-                                        <button onClick={() => toggleSchedule(s.id)} title={s.enabled ? 'Disable' : 'Enable'}
-                                            className={`flex-none rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wide transition ${s.enabled ? 'bg-emerald-500/15 text-emerald-600' : 'bg-slate-500/15 text-slate-500'}`}>
-                                            {s.enabled ? 'On' : 'Off'}
-                                        </button>
-                                        <button onClick={() => removeSchedule(s.id)} title="Delete schedule"
-                                            className="flex-none rounded p-1 text-slate-400 transition hover:bg-red-600/10 hover:text-red-600">
-                                            <Trash2 className="h-3.5 w-3.5" />
-                                        </button>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    ) : (
-                        <p className="text-xs text-slate-500 dark:text-slate-400">Auto-play a video at a set time. Fires while the Controller window is open.</p>
-                    )}
-                </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex space-x-3 border-t section-rule pt-2 2xl:col-start-1 2xl:row-start-3">
-                <button onClick={toggleMute} 
-                    className={`flex-1 px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest text-[10px] transition active:scale-95 border ${isMuted ? 'bg-red-600/10 hover:bg-red-600 text-red-600 hover:text-white border-red-600/20' : 'bg-slate-500/10 hover:bg-slate-500 text-slate-500 hover:text-white border-slate-500/20'}`}>
-                    {isMuted ? '🔇 Muted' : '🔊 Mute'}
-                </button>
-                <button onClick={handleStopClear} 
-                    className="flex-1 bg-red-600/10 hover:bg-red-600 text-red-600 hover:text-white border border-red-600/20 px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest text-[10px] transition active:scale-95">
-                    Stop & Clear
-                </button>
-            </div>
-
-            {/* Media Progress */}
-            <div className="mt-0 space-y-2 border-t section-rule pt-3 2xl:col-start-1 2xl:row-start-4">
-                <div className="flex items-center space-x-3">
-                    <button onClick={togglePlay} className="control-button-muted flex h-10 w-10 flex-none items-center justify-center rounded-full text-sm leading-none active:scale-95">
-                        {isPlaying ? '⏸' : '▶'}
-                    </button>
-                    <div className="flex-grow space-y-1">
-                        <div className="flex justify-between text-xs text-slate-600 dark:text-slate-400 font-medium px-1">
-                            <span>{formatMediaTime(currentTime)}</span>
-                            <span>{formatMediaTime(effectiveDuration)}</span>
-                        </div>
-                        <div
-                            ref={seekTrackRef}
-                            role="slider"
-                            tabIndex={0}
-                            aria-valuemin={0}
-                            aria-valuemax={Math.round(effectiveDuration || 0)}
-                            aria-valuenow={Math.round(currentTime || 0)}
-                            onPointerDown={handleTimelinePointerDown}
-                            onPointerMove={handleTimelinePointerMove}
-                            onPointerUp={stopTimelineDrag}
-                            onPointerCancel={stopTimelineDrag}
-                            onKeyDown={handleTimelineKeyDown}
-                            className={`relative w-full h-4 flex items-center ${effectiveDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'} focus:outline-none group`}
-                        >
-                            <div className="absolute left-0 right-0 h-2 bg-slate-200 dark:bg-slate-700 rounded-lg overflow-hidden">
-                                <div className="h-full bg-indigo-500 rounded-lg" style={{ width: `${progressPercent}%` }} />
-                            </div>
-                            <div className="absolute top-1/2 w-4 h-4 -mt-2 -ml-2 bg-indigo-500 border-2 border-white dark:border-slate-900 rounded-full shadow transition-transform group-focus:scale-110 group-hover:scale-110" style={{ left: `${progressPercent}%` }} />
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div className="section-rule my-4 h-px 2xl:hidden" />
-
-            {/* PHOTO / CANVA LIBRARY */}
-            <div className="surface space-y-3 rounded-lg p-3 2xl:col-start-2 2xl:row-start-1 2xl:row-span-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b section-rule pb-2">
-                    <div className="flex items-center space-x-2">
-                        <ImageIcon className="w-4 h-4 text-emerald-500" />
-                        <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 uppercase tracking-[0.2em]">Photo / Canva Library</h3>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="relative" ref={addMenuRef}>
                         <button
-                            onClick={clearPhotoLibrary}
-                            disabled={photoPlaylist.length === 0}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-red-500/20 bg-red-600/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-red-600 transition hover:bg-red-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-red-600/10 disabled:hover:text-red-600"
-                            title="Clear Photo / Canva Library"
+                            onClick={() => setAddMenuOpen(open => !open)}
+                            aria-haspopup="menu"
+                            aria-expanded={addMenuOpen}
+                            className="flex h-9 items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-indigo-500 active:scale-95"
                         >
-                            <Trash className="w-3 h-3" />
-                            Clear
+                            <Plus className="h-4 w-4" />
+                            Add<span className="-ml-1 hidden @md:inline">&nbsp;media</span>
+                            <ChevronDown className="h-4 w-4 opacity-80" />
                         </button>
-                        <div className="surface-muted flex items-center rounded-lg p-0.5">
-                            <button onClick={() => setPhotoViewMode('grid')} className={`rounded-md p-1 transition ${photoViewMode === 'grid' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`} title="Grid View"><Grid className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => setPhotoViewMode('list')} className={`rounded-md p-1 transition ${photoViewMode === 'list' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`} title="List View"><List className="w-3.5 h-3.5" /></button>
-                        </div>
-                        <button onClick={() => setPhotoLoop(!photoLoop)} className={`rounded px-2 py-1 text-[10px] font-bold transition ${photoLoop ? 'bg-emerald-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                            LOOP: {photoLoop ? 'ON' : 'OFF'}
-                        </button>
-                        <button onClick={() => setPhotoAutoNext(!photoAutoNext)} className={`rounded px-2 py-1 text-[10px] font-bold transition ${photoAutoNext ? 'bg-emerald-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                            AUTO NEXT: {photoAutoNext ? 'ON' : 'OFF'}
-                        </button>
-                    </div>
-                </div>
-
-                <div className="space-y-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <button onClick={() => setActivePhotoFolderId('all')} className={`rounded-lg border px-2.5 py-1 text-[10px] font-bold transition ${activePhotoFolderId === 'all' ? 'border-emerald-600 bg-emerald-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                            All
-                        </button>
-                        {photoFolders.map(folder => (
-                            <button key={folder.id} onClick={() => setActivePhotoFolderId(folder.id)} className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[10px] font-bold transition ${activePhotoFolderId === folder.id ? 'border-emerald-600 bg-emerald-600 text-white' : 'control-button-muted text-slate-500'}`}>
-                                <Folder className="w-3 h-3" />
-                                {folder.name}
-                            </button>
-                        ))}
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <input type="text" value={newPhotoFolderName} onChange={e => setNewPhotoFolderName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addPhotoFolder(); }} placeholder="New folder..."
-                            className="control-field w-40 px-2 py-1 text-[10px]" />
-                        <button onClick={addPhotoFolder} className="control-button-muted px-2.5 py-1 text-[10px] font-bold">
-                            + Folder
-                        </button>
-                    </div>
-                </div>
-
-                <div className={photoViewMode === 'grid'
-                    ? "grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 max-h-[520px] overflow-y-auto pr-2 custom-scrollbar"
-                    : "flex flex-col gap-2 max-h-[240px] overflow-y-auto pr-2 custom-scrollbar"}>
-                    {visiblePhotoEntries.length === 0 ? (
-                        <div className="text-xs text-slate-500 italic col-span-full text-center py-6">
-                            {photoPlaylist.length === 0 ? 'No photos or Canva slides saved yet.' : 'This folder is empty.'}
-                        </div>
-                    ) : (
-                        visiblePhotoEntries.map(({ item, index: idx }, visibleIdx) => (
-                            <div
-                                key={`${item.type}-${item.mediaId || item.path}-${idx}`}
-                                draggable
-                                onDragStart={(e) => onPhotoDragStart(e, idx)}
-                                onDragOver={(e) => onPhotoDragOver(e, idx)}
-                                onDragEnd={onPhotoDragEnd}
-                                onClick={() => { setIsPhotoLive(true); playPhotoAtIndex(idx); }}
-                                className={`surface-muted group relative flex cursor-grab overflow-hidden rounded-lg transition active:cursor-grabbing ${currentPhotoIdx === idx && isPhotoLive ? 'border-emerald-500 ring-2 ring-emerald-500/30' : 'hover:border-emerald-500/50'} ${draggedPhotoIdx === idx ? 'opacity-50 ring-2 ring-emerald-500/20' : ''} ${photoViewMode === 'grid' ? 'aspect-video flex-col' : 'h-20 shrink-0 flex-row items-center'}`}
-                            >
-                                {/* Thumbnail */}
-                                <div className={photoViewMode === 'grid' ? "w-full h-full relative" : "w-36 h-full relative flex-shrink-0 bg-black"}>
-                                    {item.type === 'photo' ? (
-                                        <img
-                                            src={item.mediaId ? authUrl('/local-image', { mediaId: item.mediaId }) : undefined}
-                                            alt={item.name}
-                                            className="w-full h-full object-cover"
-                                        />
-                                    ) : (
-                                        <div className="w-full h-full bg-purple-600/10 flex flex-col items-center justify-center p-2 text-center">
-                                            <Layout className="w-8 h-8 text-purple-500 mb-1" />
-                                            <span className="text-[8px] font-bold text-purple-400 uppercase tracking-tighter">Canva Slide</span>
-                                        </div>
-                                    )}
-
-                                    {/* Index Badge */}
-                                    <div className="absolute top-1 left-1 bg-black/60 backdrop-blur-md text-white text-[10px] font-mono px-1.5 py-0.5 rounded border border-white/20">
-                                        {visibleIdx + 1}
-                                    </div>
-                                </div>
-
-                                {/* Overlay Title (Grid) or Content (List) */}
-                                {photoViewMode === 'grid' ? (
-                                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-2">
-                                        <p className="text-xs text-white font-medium truncate">{item.name}</p>
-                                    </div>
-                                ) : (
-                                    <div className="flex-1 px-3 py-2 flex flex-col justify-center min-w-0 pr-20">
-                                        <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 truncate" title={item.name}>{item.name}</p>
-                                        <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mt-0.5">{item.type === 'canva' ? 'Canva' : 'Photo'}</p>
-                                        <select value={item.folderId || DEFAULT_FOLDER_ID} onClick={e => e.stopPropagation()} onChange={e => updatePhotoItem(idx, { folderId: e.target.value })}
-                                            className="control-field mt-1 w-32 rounded px-1 py-0.5 text-[9px]">
-                                            {photoFolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
-                                        </select>
-                                    </div>
-                                )}
-
-                                {photoViewMode === 'grid' && (
-                                    <select value={item.folderId || DEFAULT_FOLDER_ID} onClick={e => e.stopPropagation()} onChange={e => updatePhotoItem(idx, { folderId: e.target.value })}
-                                        className="absolute bottom-7 left-2 max-w-[calc(100%-1rem)] bg-black/60 text-white border border-white/20 rounded px-1 py-0.5 text-[8px] outline-none opacity-0 group-hover:opacity-100 transition-opacity">
-                                        {photoFolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
-                                    </select>
-                                )}
-
-                                {/* Drag Handle */}
-                                <div className={`absolute ${photoViewMode === 'grid' ? 'top-1 right-1' : 'inset-y-0 right-10 flex items-center'} opacity-0 group-hover:opacity-100 transition-opacity`}>
-                                    <GripVertical className={`w-3 h-3 ${photoViewMode === 'grid' ? 'text-white/50' : 'text-slate-400 dark:text-slate-500'}`} />
-                                </div>
-
-                                {/* Delete Button */}
-                                <button
-                                    onClick={(e) => removePhotoItem(idx, e)}
-                                    className={`absolute ${photoViewMode === 'grid' ? 'top-1 right-6' : 'inset-y-0 right-2 flex items-center h-fit my-auto'} p-1 bg-red-600 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity transform hover:scale-110 active:scale-95`}
-                                >
-                                    <Trash className="w-2.5 h-2.5" />
+                        {addMenuOpen && (
+                            <div role="menu" className="surface-raised absolute right-0 top-12 z-30 w-72 rounded-xl p-1.5 shadow-2xl">
+                                <button role="menuitem" onClick={() => chooseAddOption('videoFile')} className={addMenuItemClass}>
+                                    Video from computer
+                                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">Or drag files onto the library</span>
                                 </button>
+                                <button role="menuitem" onClick={() => chooseAddOption('photoFile')} className={addMenuItemClass}>
+                                    Photos / slides from computer
+                                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">Pick one or many</span>
+                                </button>
+                                <div className="section-rule my-1 h-px" />
+                                <button role="menuitem" onClick={() => chooseAddOption('youtube')} className={addMenuItemClass}>YouTube video</button>
+                                <button role="menuitem" onClick={() => chooseAddOption('ytPlaylist')} className={addMenuItemClass}>YouTube playlist</button>
+                                <button role="menuitem" onClick={() => chooseAddOption('canva')} className={addMenuItemClass}>Canva presentation</button>
+                                <button role="menuitem" onClick={() => chooseAddOption('webpage')} className={addMenuItemClass}>Web page</button>
                             </div>
-                        ))
-                    )}
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Local Photo Input */}
-                    <div className="surface-muted space-y-2 rounded-lg p-3">
-                        <div className="flex items-center space-x-2">
-                            <ImageIcon className="w-3.5 h-3.5 text-emerald-500" />
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Local Photos</label>
-                        </div>
-                        <div className="control-field flex items-center space-x-2 p-1.5">
-                            <button onClick={handleBrowsePhoto} className="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold py-1 px-2.5 rounded transition flex-none">
-                                Browse...
-                            </button>
-                            <span className="text-[10px] text-slate-500 truncate flex-1">{photoFileName}</span>
-                        </div>
-                        <button onClick={handleAddPhoto} className="w-full bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold py-2 rounded-lg border border-emerald-600/20 transition uppercase tracking-widest">
-                            + Add to Photo Library
-                        </button>
-                    </div>
-
-                    {/* Canva Input */}
-                    <div className="surface-muted space-y-2 rounded-lg p-3">
-                        <div className="flex items-center space-x-2">
-                            <Monitor className="w-3.5 h-3.5 text-purple-500" />
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Canva</label>
-                        </div>
-                        <div className="space-y-1.5">
-                            <input type="text" value={canvaUrl} onChange={e=>setCanvaUrl(e.target.value)} placeholder="Canva share URL..." 
-                                className="control-field w-full px-2.5 py-1.5 text-[10px]" />
-                            <input type="text" value={canvaName} onChange={e=>setCanvaName(e.target.value)} placeholder="Name..." 
-                                className="control-field w-full px-2.5 py-1.5 text-[10px]" />
-                        </div>
-                        <button onClick={handleAddCanva} className="w-full bg-purple-600/10 hover:bg-purple-600/20 text-purple-600 dark:text-purple-400 text-[10px] font-bold py-2 rounded-lg border border-purple-600/20 transition uppercase tracking-widest">
-                            + Save Canva to Library
-                        </button>
+                        )}
                     </div>
                 </div>
+            </div>
 
-                <div className="pt-3 flex space-x-3">
-                    <div className="surface-muted flex w-1/2 items-center space-x-3 rounded-lg px-4">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase whitespace-nowrap">Auto Interval</span>
-                        <input type="range" min="1" max="60" value={photoInterval} onChange={e=>setPhotoInterval(parseInt(e.target.value))} 
-                            className="flex-1 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500 min-w-0" />
-                        <span className="text-[10px] font-mono font-bold text-emerald-500 w-6 text-right flex-none">{photoInterval}s</span>
+            {/* ===== Overlays (message + particles), opened from the header ===== */}
+            {showOverlays && (
+                <div className="surface rounded-xl p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                        <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100">Overlays on top of media</h3>
+                        <button onClick={() => setShowOverlays(false)} className="control-button-muted px-3 py-1.5 text-xs font-bold">Close</button>
                     </div>
-
-                    <button onClick={stopPhotoOutput} 
-                        className="w-1/2 bg-red-600/10 hover:bg-red-600 text-red-600 hover:text-white border border-red-600/20 py-2.5 rounded-xl font-bold uppercase tracking-widest text-[10px] transition active:scale-95 flex items-center justify-center">
-                        Stop & Clear
-                    </button>
-                </div>
-
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 {/* MESSAGE OVERLAY */}
                 <div className="surface-muted space-y-3 rounded-lg p-3">
                     <div className="flex items-center justify-between border-b section-rule pb-2">
@@ -1539,8 +1193,6 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                         </div>
                     </div>
                 </div>
-            </div>
-
             {/* PARTICLE OVERLAYS */}
             {showParticleOverlayControls && (
                 <div className="surface space-y-4 rounded-lg p-4">
@@ -1603,6 +1255,431 @@ export default function MediaPanel({ socket, showParticleOverlayControls = false
                     </div>
                 </div>
             )}
+                        {!showParticleOverlayControls && (
+                            <p className="text-xs text-slate-500 dark:text-slate-400">Particle effects can be turned on in Settings.</p>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* ===== Add panel (opens from the Add menu) ===== */}
+            {addMode && (
+                <div className="surface space-y-3 rounded-xl p-4">
+                    <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                            {addMode === 'youtube' && 'Add a YouTube video'}
+                            {addMode === 'ytPlaylist' && 'Add a YouTube playlist'}
+                            {addMode === 'webpage' && 'Add a web page'}
+                            {addMode === 'canva' && 'Add a Canva presentation'}
+                            {addMode === 'schedule' && 'Scheduled videos'}
+                        </h3>
+                        <button onClick={() => setAddMode(null)} className="control-button-muted px-3 py-1.5 text-xs font-bold">Done</button>
+                    </div>
+
+                    {addMode === 'youtube' && (
+                        <div className="flex gap-2">
+                            <input type="text" value={youtubeUrl} onChange={e => setYoutubeUrl(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleAddYoutube(); }} placeholder="Paste a YouTube link" autoFocus
+                                className="control-field h-10 flex-1 px-3 text-sm" />
+                            <button onClick={handleAddYoutube} disabled={isFetchingYt} className="h-10 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50">
+                                {isFetchingYt ? 'Adding…' : 'Add'}
+                            </button>
+                        </div>
+                    )}
+
+                    {addMode === 'ytPlaylist' && (
+                        <div className="space-y-2">
+                            <div className="flex gap-2">
+                                <input type="text" value={youtubePlaylistUrl} onChange={e => setYoutubePlaylistUrl(e.target.value)} placeholder="Paste a YouTube playlist link" autoFocus
+                                    className="control-field h-10 flex-1 px-3 text-sm" />
+                                <input type="number" min="1" value={playlistLimit} onChange={e => setPlaylistLimit(e.target.value)}
+                                    title="Newest videos to fetch (leave blank for all)" placeholder="All" aria-label="How many videos"
+                                    className="control-field h-10 px-2 text-center text-sm" style={{ width: '5rem' }} />
+                                <button onClick={handleAddYoutubePlaylist} disabled={isFetchingPlaylist} className="h-10 flex-none rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50">
+                                    {isFetchingPlaylist ? 'Loading…' : 'Choose videos'}
+                                </button>
+                            </div>
+                            <p className="text-xs text-slate-500 dark:text-slate-400">Fetches the newest videos first. Leave the count blank to load the whole playlist.</p>
+                        </div>
+                    )}
+
+                    {addMode === 'webpage' && (
+                        <div className="flex gap-2">
+                            <input type="text" value={webpageUrl} onChange={e => setWebpageUrl(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleAddWebpage(); }} placeholder="https://example.com" autoFocus
+                                className="control-field h-10 flex-1 px-3 text-sm" />
+                            <button onClick={handleAddWebpage} className="h-10 flex-none rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500">Add</button>
+                        </div>
+                    )}
+
+                    {addMode === 'canva' && (
+                        <div className="flex flex-wrap gap-2">
+                            <input type="text" value={canvaUrl} onChange={e => setCanvaUrl(e.target.value)} placeholder="Canva share link" autoFocus
+                                className="control-field h-10 flex-[2] px-3 text-sm" style={{ minWidth: '15rem' }} />
+                            <input type="text" value={canvaName} onChange={e => setCanvaName(e.target.value)} placeholder="Name (optional)"
+                                className="control-field h-10 flex-1 px-3 text-sm" style={{ minWidth: '10rem' }} />
+                            <button onClick={handleAddCanva} className="h-10 flex-none rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500">Add</button>
+                        </div>
+                    )}
+
+                    {addMode === 'schedule' && (
+                        <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                        <select value={newScheduleIdx} onChange={e => setNewScheduleIdx(e.target.value)}
+                            className="control-field w-full px-3 py-1.5 text-sm">
+                            <option value="">Choose a video…</option>
+                            {playlist.map((item, i) => (
+                                <option key={i} value={i}>{getItemTitle(item)}</option>
+                            ))}
+                        </select>
+                        <input type="time" value={newScheduleTime} onChange={e => setNewScheduleTime(e.target.value)}
+                            className="control-field w-full px-3 py-1.5 text-sm" />
+                        <div className="flex overflow-hidden rounded-lg border border-slate-500/20">
+                            {[['once', 'Once'], ['daily', 'Daily'], ['weekly', 'Days']].map(([mode, label]) => (
+                                <button key={mode} onClick={() => setNewScheduleMode(mode)}
+                                    className={`flex-1 px-3 py-1.5 text-xs font-bold transition ${newScheduleMode === mode ? 'bg-amber-500 text-white' : 'bg-slate-500/10 text-slate-500'}`}>{label}</button>
+                            ))}
+                        </div>
+                        {newScheduleMode === 'weekly' && (
+                            <div className="flex justify-between gap-1">
+                                {WEEKDAY_OPTIONS.map(([label, day], i) => {
+                                    const active = newScheduleDays.includes(day);
+                                    return (
+                                        <button key={i} onClick={() => toggleNewScheduleDay(day)}
+                                            title={['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day]}
+                                            className={`h-7 flex-1 rounded text-xs font-bold transition ${active ? 'bg-amber-500 text-white' : 'bg-slate-500/10 text-slate-500 hover:bg-slate-500/20'}`}>
+                                            {label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
+                        <button onClick={addSchedule} disabled={newScheduleIdx === '' || !newScheduleTime || (newScheduleMode === 'weekly' && newScheduleDays.length === 0)}
+                            className="control-button-muted flex w-full items-center justify-center px-4 py-2 text-sm font-medium active:scale-95 disabled:cursor-not-allowed disabled:opacity-40">
+                            + Schedule
+                        </button>
+                    </div>
+
+                    {scheduledPlays.length > 0 ? (
+                        <div className="space-y-1.5 border-t section-rule pt-2">
+                            {scheduledPlays.map(s => {
+                                const { secondsUntil } = scheduleTick(s, scheduleNow);
+                                const done = s.mode === 'once' && !!s.lastFiredDate;
+                                return (
+                                    <div key={s.id} className="flex items-center gap-2 rounded-md bg-slate-500/5 px-2 py-1.5">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="truncate text-sm text-slate-700 dark:text-slate-200">{getItemTitle(s.item)}</div>
+                                            <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                                <span className="font-semibold">{formatClock12(s.time)}</span>
+                                                <span className="rounded bg-slate-500/15 px-1 py-0.5 uppercase tracking-wide">{s.mode === 'daily' ? 'Daily' : s.mode === 'weekly' ? formatDays(s.days) : 'Once'}</span>
+                                                <span>{done ? 'Done' : (s.enabled ? formatCountdown(secondsUntil) : 'Off')}</span>
+                                            </div>
+                                        </div>
+                                        <button onClick={() => toggleSchedule(s.id)} title={s.enabled ? 'Disable' : 'Enable'}
+                                            className={`flex-none rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wide transition ${s.enabled ? 'bg-emerald-500/15 text-emerald-600' : 'bg-slate-500/15 text-slate-500'}`}>
+                                            {s.enabled ? 'On' : 'Off'}
+                                        </button>
+                                        <button onClick={() => removeSchedule(s.id)} title="Delete schedule"
+                                            className="flex-none rounded p-1 text-slate-400 transition hover:bg-red-600/10 hover:text-red-600">
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">Auto-play a video at a set time. Fires while the Controller window is open.</p>
+                    )}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* ===== Folders (left) + library (right) ===== */}
+            {/* Narrow: folders become a scrollable row of chips above the library. */}
+            <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 @xl:hidden" role="toolbar" aria-label="Folders">
+                <button onClick={() => setActiveFolderId('all')}
+                    className={`inline-flex h-9 flex-none items-center gap-1.5 rounded-full border px-3.5 text-sm font-medium transition ${activeFolderId === 'all' ? 'border-transparent bg-indigo-600 text-white' : 'border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-300'}`}>
+                    All Media <span className="opacity-70">{libraryEntries.length}</span>
+                </button>
+                {mediaFolders.map(folder => (
+                    <button key={folder.id} onClick={() => setActiveFolderId(folder.id)} {...folderDropProps(folder.id)}
+                        className={`inline-flex h-9 flex-none items-center gap-1.5 rounded-full border px-3.5 text-sm font-medium transition ${dropFolderId === folder.id ? 'border-transparent bg-indigo-600 text-white ring-2 ring-indigo-400' : activeFolderId === folder.id ? 'border-transparent bg-indigo-600 text-white' : 'border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-300'}`}>
+                        <Folder className="h-3.5 w-3.5" />{folder.name} <span className="opacity-70">{folderCount(folder.id)}</span>
+                    </button>
+                ))}
+                <button onClick={() => setShowNewFolderInput(true)} className="inline-flex h-9 flex-none items-center gap-1 rounded-full border border-dashed border-slate-400 px-3.5 text-sm text-slate-500 dark:border-slate-600">
+                    <Plus className="h-3.5 w-3.5" /> Folder
+                </button>
+            </div>
+            {showNewFolderInput && (
+                <div className="flex items-center gap-2 @xl:hidden">
+                    <input type="text" value={newFolderName} onChange={e => setNewFolderName(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') commitNewFolder(); if (e.key === 'Escape') setShowNewFolderInput(false); }}
+                        placeholder="Folder name" aria-label="New folder name" className="control-field h-9 px-3 text-sm" style={{ maxWidth: '16rem' }} />
+                    <button onClick={commitNewFolder} className="h-9 flex-none rounded-lg bg-indigo-600 px-3 text-sm font-semibold text-white">Create</button>
+                    <button onClick={() => setShowNewFolderInput(false)} className="control-button-muted h-9 flex-none px-3 text-sm">Cancel</button>
+                </div>
+            )}
+
+            <div className="flex items-start gap-4">
+                <nav aria-label="Folders" title="Drag media onto a folder to move it. Drag folders to reorder; double-click to rename." className="surface hidden flex-none space-y-1 rounded-xl p-2 @xl:block" style={{ width: '13.5rem' }}>
+                    <button onClick={() => setActiveFolderId('all')} className={folderButtonClass(activeFolderId === 'all', false)}>
+                        <ListVideo className="h-4 w-4 flex-none" />
+                        <span className="flex-1 truncate">All Media</span>
+                        <span className="text-xs opacity-70">{libraryEntries.length}</span>
+                    </button>
+                    <div className="section-rule mx-2 my-1 h-px" />
+                    {mediaFolders.map(folder => (
+                        renamingFolderId === folder.id ? (
+                            <div key={folder.id} className="p-1">
+                                <input
+                                    type="text"
+                                    value={renameDraft}
+                                    onChange={e => setRenameDraft(e.target.value)}
+                                    onKeyDown={e => { if (e.key === 'Enter') commitRenameFolder(); if (e.key === 'Escape') setRenamingFolderId(null); }}
+                                    onBlur={commitRenameFolder}
+                                    aria-label={`Rename folder ${folder.name}`}
+                                    autoFocus
+                                    className="control-field h-9 px-3 text-sm"
+                                />
+                            </div>
+                        ) : (
+                        <div
+                            key={folder.id}
+                            className={`group/folder relative ${draggedFolderId === folder.id ? 'opacity-50' : ''}`}
+                            draggable
+                            onDragStart={(e) => { setDraggedFolderId(folder.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', folder.id); }}
+                            onDragEnd={() => setDraggedFolderId(null)}
+                            {...folderDropProps(folder.id)}
+                        >
+                            <button onClick={() => setActiveFolderId(folder.id)} onDoubleClick={() => startRenameFolder(folder)}
+                                title={`${folder.name} — drag to reorder, double-click to rename`}
+                                className={`${folderButtonClass(activeFolderId === folder.id, dropFolderId === folder.id)} cursor-grab active:cursor-grabbing`}>
+                                <Folder className="h-4 w-4 flex-none" />
+                                <span className="flex-1 truncate">{folder.name}</span>
+                                <span className="text-xs opacity-70 group-hover/folder:opacity-0">{folderCount(folder.id)}</span>
+                            </button>
+                            <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center opacity-0 transition group-hover/folder:opacity-100 focus-within:opacity-100">
+                                <button onClick={() => startRenameFolder(folder)} aria-label={`Rename folder ${folder.name}`} title="Rename folder"
+                                    className="rounded p-1 text-slate-400 transition hover:bg-slate-500/10 hover:text-indigo-500">
+                                    <Pencil className="h-3.5 w-3.5" />
+                                </button>
+                                {folder.id !== DEFAULT_FOLDER_ID && (
+                                    <button onClick={() => deleteFolder(folder)} aria-label={`Delete folder ${folder.name}`} title="Delete folder (items move to Unsorted)"
+                                        className="rounded p-1 text-slate-400 transition hover:bg-red-600/10 hover:text-red-600">
+                                        <X className="h-3.5 w-3.5" />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                        )
+                    ))}
+                    {showNewFolderInput ? (
+                        <div className="space-y-1.5 p-1">
+                            <input
+                                type="text"
+                                value={newFolderName}
+                                onChange={e => setNewFolderName(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') commitNewFolder(); if (e.key === 'Escape') setShowNewFolderInput(false); }}
+                                placeholder="Folder name"
+                                aria-label="New folder name"
+                                autoFocus
+                                className="control-field h-9 px-3 text-sm"
+                            />
+                            <div className="flex gap-1.5">
+                                <button onClick={commitNewFolder} className="h-8 flex-1 rounded-lg bg-indigo-600 text-xs font-semibold text-white">Create</button>
+                                <button onClick={() => setShowNewFolderInput(false)} className="control-button-muted h-8 flex-1 text-xs font-semibold">Cancel</button>
+                            </div>
+                        </div>
+                    ) : (
+                        <button onClick={() => setShowNewFolderInput(true)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-500 transition hover:bg-slate-500/10 hover:text-indigo-500">
+                            <Plus className="h-4 w-4" /> New folder
+                        </button>
+                    )}
+                </nav>
+
+                {/* Library (also a drop target for files from your computer) */}
+                <div
+                    className="relative min-w-0 flex-1"
+                    onDragEnter={(e) => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); setIsDropActive(true); } }}
+                    onDragOver={(e) => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); setIsDropActive(true); } }}
+                    onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setIsDropActive(false); }}
+                    onDrop={(e) => { if (e.dataTransfer?.files?.length) handleMediaDrop(e); else setIsDropActive(false); }}
+                >
+                    <div className="mb-3 flex items-baseline justify-between gap-3">
+                        <h2 className="truncate text-base font-semibold text-slate-800 dark:text-slate-100">
+                            {activeFolderId === 'all' ? 'All Media' : (mediaFolders.find(f => f.id === activeFolderId)?.name || 'Folder')}
+                            <span className="ml-2 text-sm font-medium text-slate-500">{shownEntries.length} item{shownEntries.length === 1 ? '' : 's'}</span>
+                        </h2>
+                        <div className="flex items-center gap-3">
+                            {scheduledPlays.some(s => s.enabled) && (
+                                <button onClick={() => setAddMode('schedule')} className="inline-flex h-8 items-center gap-1.5 rounded-full bg-amber-500/15 px-3 text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                    <Clock className="h-3.5 w-3.5" />
+                                    {scheduledPlays.filter(s => s.enabled).length} scheduled
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {(isDropActive || isImportingDrop) && (
+                        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-indigo-500 bg-indigo-500/10">
+                            <div className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-lg">
+                                <Upload className="h-4 w-4" />
+                                {isImportingDrop ? 'Adding files…' : 'Drop to add to the library'}
+                            </div>
+                        </div>
+                    )}
+
+                    {shownEntries.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 py-16 text-center dark:border-slate-700">
+                            <Film className="h-8 w-8 text-slate-400" />
+                            <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                                {searchQuery ? 'Nothing matches your search' : libraryEntries.length === 0 ? 'Your media library is empty' : 'This folder is empty'}
+                            </p>
+                            {!searchQuery && <p className="text-xs text-slate-500">Drag videos or photos here, or use <strong>Add media</strong>.</p>}
+                        </div>
+                    ) : (
+                        <div className={viewMode === 'grid' ? 'grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-3 @2xl:gap-4' : 'flex flex-col gap-2'}>
+                            {shownEntries.map((entry, visibleIdx) => {
+                                const { item, kind, key } = entry;
+                                const isCurrentVideo = kind === 'video' && isSameMediaItem(item, mediaData);
+                                const onAir = kind === 'video' ? (isCurrentVideo && isPlaying) : (isPhotoLive && currentPhotoIdx === entry.index);
+                                const paused = isCurrentVideo && !isPlaying;
+                                const grid = viewMode === 'grid';
+                                const title = entryTitle(entry);
+                                return (
+                                    <div
+                                        key={`${key}-${visibleIdx}`}
+                                        draggable
+                                        onDragStart={(e) => onEntryDragStart(e, key)}
+                                        onDragOver={(e) => onEntryDragOver(e, key)}
+                                        onDragEnd={onEntryDragEnd}
+                                        onClick={() => playEntry(entry)}
+                                        className={`media-card group relative cursor-pointer overflow-hidden rounded-xl transition ${onAir ? 'ring-2 ring-red-500' : paused ? 'ring-2 ring-amber-500' : ''} ${draggedKey === key ? 'opacity-50' : ''} ${grid ? 'flex flex-col' : 'flex h-[72px] items-center'}`}
+                                    >
+                                        <div className={grid ? 'relative aspect-video w-full bg-black' : 'relative h-full flex-none bg-black'} style={grid ? undefined : { width: '8rem' }}>
+                                            {renderEntryThumb(entry)}
+                                            {onAir ? (
+                                                <span className="absolute left-2 top-2 rounded bg-red-600 px-2 py-0.5 text-[11px] font-bold tracking-wider text-white">ON AIR</span>
+                                            ) : paused ? (
+                                                <span className="absolute left-2 top-2 rounded bg-amber-500 px-2 py-0.5 text-[11px] font-bold tracking-wider text-black">PAUSED</span>
+                                            ) : null}
+                                            {kind === 'video' && item.duration ? (
+                                                <span className="absolute bottom-2 right-2 rounded bg-black/75 px-1.5 py-0.5 font-mono text-[11px] text-white">{formatMediaTime(item.duration)}</span>
+                                            ) : null}
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); if (kind === 'video') removePlaylistItem(entry.index, e); else removePhotoItem(entry.index, e); }}
+                                                aria-label={`Remove ${title}`} title="Remove from library"
+                                                className="absolute right-2 top-2 rounded bg-black/70 p-1 text-white opacity-0 shadow transition-opacity hover:bg-red-600 group-hover:opacity-100">
+                                                <Trash2 className="h-3.5 w-3.5" />
+                                            </button>
+                                        </div>
+                                        <div className="min-w-0 flex-1 px-3 py-2">
+                                            <p className="truncate text-[13px] font-semibold text-slate-800 dark:text-slate-100" title={title}>{title}</p>
+                                            <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                                                {entryTypeLabel(entry)}
+                                                {activeFolderId === 'all' && (item.folderId || DEFAULT_FOLDER_ID) !== DEFAULT_FOLDER_ID && (
+                                                    <span className="normal-case tracking-normal"> · {mediaFolders.find(f => f.id === item.folderId)?.name}</span>
+                                                )}
+                                            </p>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* ===== Live controls — docked under the Live Preview (fixed position) ===== */}
+            {(() => {
+                if (!isActive && !liveKind) return null;
+                const pill = liveKind
+                    ? <span className={`rounded px-2 py-0.5 text-[10px] font-bold tracking-wider ${liveKind === 'video' && !isPlaying ? 'bg-amber-500 text-black' : 'bg-red-600 text-white'}`}>{liveKind === 'video' && !isPlaying ? 'PAUSED' : 'ON AIR'}</span>
+                    : <span className="rounded bg-slate-500/15 px-2 py-0.5 text-[10px] font-bold tracking-wider text-slate-500">NOTHING ON AIR</span>;
+                const liveName = liveKind === 'video' ? getItemTitle(mediaData) : liveKind === 'photo' ? livePhoto.name : null;
+                const dock = (
+                    <section aria-label="Live media controls" className={`surface rounded-lg p-3 ${liveKind ? 'ring-2 ring-red-500/40' : ''}`}>
+                        <div className="flex items-center justify-between gap-2">
+                            <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500">Media Controls</h3>
+                            {pill}
+                        </div>
+                        <p className="mt-2 line-clamp-2 text-sm font-semibold text-slate-800 dark:text-slate-100" title={liveName || ''}>
+                            {liveName || <span className="font-normal text-slate-500">Click something in Media to put it on air</span>}
+                        </p>
+
+                        {liveKind === 'photo' ? (
+                            <>
+                                <p className="mt-0.5 text-xs text-slate-500">{entryTypeLabel({ kind: 'photo', item: livePhoto })} {currentPhotoIdx + 1} of {photoPlaylist.length}</p>
+                                <div className="mt-3 flex items-center justify-center gap-3">
+                                    <button onClick={() => playPhotoAtIndex(currentPhotoIdx <= 0 ? photoPlaylist.length - 1 : currentPhotoIdx - 1)} aria-label="Previous photo" title="Previous" className={roundButtonClass}><SkipBack className="h-5 w-5" /></button>
+                                    <button onClick={() => playPhotoAtIndex(currentPhotoIdx >= photoPlaylist.length - 1 ? 0 : currentPhotoIdx + 1)} aria-label="Next photo" title="Next"
+                                        className="flex h-14 w-14 flex-none items-center justify-center rounded-full bg-slate-900 text-white shadow transition hover:bg-indigo-600 active:scale-95 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-indigo-400"><SkipForward className="h-6 w-6" /></button>
+                                </div>
+                                <div className="mt-3 grid grid-cols-2 gap-2">
+                                    <button onClick={() => setPhotoAutoNext(!photoAutoNext)} aria-pressed={photoAutoNext} className={smallToggle(photoAutoNext)}>Auto-advance</button>
+                                    <button onClick={() => setPhotoLoop(!photoLoop)} aria-pressed={photoLoop} className={smallToggle(photoLoop)}><Repeat className="mr-1 inline h-3.5 w-3.5" />Loop</button>
+                                </div>
+                                {photoAutoNext && (
+                                    <label className="mt-3 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                                        <span className="whitespace-nowrap">Every</span>
+                                        <input type="range" min="1" max="60" value={photoInterval} onChange={e => setPhotoInterval(parseInt(e.target.value, 10))} aria-label="Seconds between photos"
+                                            className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-lg bg-slate-200 accent-indigo-500 dark:bg-slate-700" />
+                                        <span className="w-8 text-right font-mono text-indigo-500">{photoInterval}s</span>
+                                    </label>
+                                )}
+                                <button onClick={stopPhotoOutput} className="mt-3 h-10 w-full rounded-lg border border-red-600/40 bg-red-600/10 text-xs font-bold uppercase tracking-wider text-red-600 transition hover:bg-red-600 hover:text-white">Stop &amp; Clear</button>
+                            </>
+                        ) : (
+                            <>
+                                <div className="mt-3 flex items-center gap-2">
+                                    <span className="w-10 font-mono text-[11px] text-slate-600 dark:text-slate-300">{formatMediaTime(currentTime)}</span>
+                                    <div
+                                        ref={seekTrackRef}
+                                        role="slider"
+                                        tabIndex={0}
+                                        aria-label="Playback position"
+                                        aria-valuemin={0}
+                                        aria-valuemax={Math.round(effectiveDuration || 0)}
+                                        aria-valuenow={Math.round(currentTime || 0)}
+                                        onPointerDown={handleTimelinePointerDown}
+                                        onPointerMove={handleTimelinePointerMove}
+                                        onPointerUp={stopTimelineDrag}
+                                        onPointerCancel={stopTimelineDrag}
+                                        onKeyDown={handleTimelineKeyDown}
+                                        className={`group relative flex h-5 flex-1 items-center ${effectiveDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'} focus:outline-none`}
+                                    >
+                                        <div className="absolute left-0 right-0 h-2 overflow-hidden rounded-lg bg-slate-200 dark:bg-slate-700">
+                                            <div className={`h-full rounded-lg ${isPlaying ? 'bg-red-500' : 'bg-indigo-500'}`} style={{ width: `${progressPercent}%` }} />
+                                        </div>
+                                        <div className="absolute top-1/2 -ml-2 -mt-2 h-4 w-4 rounded-full border-2 border-white bg-indigo-500 shadow transition-transform group-hover:scale-110 group-focus:scale-110 dark:border-slate-900" style={{ left: `${progressPercent}%` }} />
+                                    </div>
+                                    <span className="w-12 text-right font-mono text-[11px] text-slate-600 dark:text-slate-300" title="Time left">-{formatMediaTime(remainingTime)}</span>
+                                </div>
+                                <div className="mt-3 flex items-center justify-center gap-3">
+                                    <button onClick={handlePlayPrev} disabled={playlist.length === 0} aria-label="Previous video" title="Previous video" className={roundButtonClass}><SkipBack className="h-5 w-5" /></button>
+                                    <button onClick={togglePlay} disabled={!mediaData} aria-label={isPlaying ? 'Pause' : 'Play'} title={isPlaying ? 'Pause' : 'Play'}
+                                        className="flex h-14 w-14 flex-none items-center justify-center rounded-full bg-slate-900 text-white shadow transition hover:bg-indigo-600 active:scale-95 disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-indigo-400">
+                                        {isPlaying ? <Pause className="h-6 w-6 fill-current" /> : <Play className="ml-0.5 h-6 w-6 fill-current" />}
+                                    </button>
+                                    <button onClick={handlePlayNext} disabled={playlist.length === 0} aria-label="Next video" title="Next video" className={roundButtonClass}><SkipForward className="h-5 w-5" /></button>
+                                </div>
+                                <div className="mt-3 grid grid-cols-3 gap-2">
+                                    <button onClick={toggleLoop} aria-pressed={loop} className={smallToggle(loop)}><Repeat className="mr-1 inline h-3.5 w-3.5" />Loop</button>
+                                    <button onClick={toggleAutoNext} aria-pressed={autoNext} className={smallToggle(autoNext)}>Auto-next</button>
+                                    <button onClick={toggleMute} aria-pressed={isMuted} className={`h-9 whitespace-nowrap rounded-lg border px-1 text-[11px] font-bold uppercase tracking-normal transition ${isMuted ? 'border-red-500 bg-red-600/15 text-red-600' : 'border-slate-300 text-slate-600 hover:border-slate-400 dark:border-slate-700 dark:text-slate-300'}`}>
+                                        {isMuted ? <VolumeX className="mr-1 inline h-3.5 w-3.5" /> : <Volume2 className="mr-1 inline h-3.5 w-3.5" />}
+                                        {isMuted ? 'Muted' : 'Mute'}
+                                    </button>
+                                </div>
+                                <button onClick={handleStopClear} disabled={!mediaData} className="mt-3 h-10 w-full rounded-lg border border-red-600/40 bg-red-600/10 text-xs font-bold uppercase tracking-wider text-red-600 transition hover:bg-red-600 hover:text-white disabled:opacity-40 disabled:hover:bg-red-600/10 disabled:hover:text-red-600">Stop &amp; Clear</button>
+                            </>
+                        )}
+                    </section>
+                );
+                // Remote browsers have no Live Preview column to dock into, so they keep the
+                // controls inline under the library instead.
+                return dockEl ? createPortal(dock, dockEl) : <div className="mt-2">{dock}</div>;
+            })()}
 
             {/* YouTube playlist import picker */}
             {playlistPickerItems !== null && (

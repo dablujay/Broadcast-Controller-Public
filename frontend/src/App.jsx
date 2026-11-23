@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useReducer, useCallback, lazy, Suspense } from 'react';
 import { io } from 'socket.io-client';
-import { ChevronLeft, ChevronRight, ClipboardList, Command, ExternalLink, Film, Grid3x3, Languages, LayoutGrid, ListVideo, Monitor, MonitorCheck, Moon, Music, PanelLeftClose, PanelLeftOpen, Pause, Play, Presentation, Radio, RotateCcw, Search, Settings, Sun, Timer, Trash2, Type, X, Zap } from 'lucide-react';
+import { ClipboardList, Command, ExternalLink, Film, Grid3x3, Languages, LayoutGrid, ListVideo, Monitor, MonitorCheck, Moon, Music, PanelLeftClose, PanelLeftOpen, Pause, Play, Presentation, Radio, RotateCcw, Search, Settings, Sun, Timer, Type, X, Zap } from 'lucide-react';
 import { authUrl, getAuthToken, getRemoteToken, isRemoteEntry, socketOptions } from './auth';
 import { useThrottledCallback } from './utils/performance';
 import { downloadBackup, restoreBackup } from './utils/backup';
@@ -26,6 +26,28 @@ import RemoteQr from './components/RemoteQr';
 
 
 const SHOW_PARTICLE_OVERLAY_CONTROLS_KEY = 'bc-show-particle-overlay-controls';
+// Stage (confidence) and backstage monitors are hidden unless switched on in Settings —
+// a single-screen setup (laptop + one TV) has no use for them.
+const SHOW_MONITORS_KEY = 'bc-show-monitors';
+// Pages the operator can hide from the sidebar (Settings → Pages). Hidden pages stay mounted —
+// Pad Layout, for one, keeps publishing its layout to paired pads even when not shown.
+const HIDDEN_PAGES_KEY = 'bc-hidden-pages';
+const HIDEABLE_PAGES = [
+  { id: 'runshow', label: 'Run of Show', detail: 'Cue-list timeline' },
+  { id: 'translation', label: 'Translation', detail: 'Live AI speech captions' },
+  { id: 'supersource', label: 'SuperSource Designer', detail: 'ATEM video switcher picture-in-picture' },
+  { id: 'pad', label: 'Pad Layout', detail: 'Button grid for a phone/tablet remote' },
+];
+const DEFAULT_HIDDEN_PAGES = ['runshow', 'supersource', 'pad'];
+// Width of the Live Preview column, set by dragging its left edge.
+const PREVIEW_WIDTH_KEY = 'bc-preview-width';
+const PREVIEW_MIN_WIDTH = 260;
+const defaultPreviewWidth = () => (window.innerWidth >= 1536 ? 480 : window.innerWidth >= 1280 ? 400 : 300);
+// Never let the preview take more than ~55% of the window, so the page stays usable.
+const clampPreviewWidth = (width) => Math.round(Math.min(
+  Math.max(width, PREVIEW_MIN_WIDTH),
+  Math.max(PREVIEW_MIN_WIDTH, Math.min(900, window.innerWidth * 0.55))
+));
 
 const LAYER_LABELS = {
   presentation: 'Presentation',
@@ -72,6 +94,7 @@ const TAB_GROUPS = [
   },
   {
     label: 'Production Monitor',
+    monitors: true,
     tabs: [
       { id: 'stage', label: 'Confidence Monitor', cue: 'Stage', icon: MonitorCheck },
       { id: 'backstage', label: 'Backstage Monitor', cue: 'Rundown', icon: ClipboardList },
@@ -132,25 +155,20 @@ function liveStateReducer(state, action) {
   }
 }
 
-// Reusable hook for responsive design
 function useMediaQuery(query) {
-  const [matches, setMatches] = useState(window.matchMedia(query).matches);
-
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
   useEffect(() => {
     const media = window.matchMedia(query);
-    if (media.matches !== matches) {
-      setMatches(media.matches);
-    }
     const listener = () => setMatches(media.matches);
+    listener();
     media.addEventListener('change', listener);
     return () => media.removeEventListener('change', listener);
-  }, [matches, query]);
-
+  }, [query]);
   return matches;
 }
 
 // Preview Iframe component - DEFINED OUTSIDE to prevent unmount/remount loops
-const PreviewIframe = ({ isSidebar = false, activeTab }) => {
+const PreviewIframe = ({ isSidebar = false, activeTab, showMonitors = true }) => {
   const wrapperRef = useRef(null);
   const [iframesReady, setIframesReady] = useState(false);
   const [previewMode, setPreviewMode] = useState(() => ['stage', 'backstage'].includes(activeTab) ? activeTab : 'graphics');
@@ -172,6 +190,11 @@ const PreviewIframe = ({ isSidebar = false, activeTab }) => {
     if (activeTab === 'stage') setPreviewMode('stage');
     if (activeTab === 'backstage') setPreviewMode('backstage');
   }, [activeTab]);
+
+  // With the monitors hidden, the preview always shows the real (graphics) output.
+  useEffect(() => {
+    if (!showMonitors) setPreviewMode('graphics');
+  }, [showMonitors]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -210,8 +233,10 @@ const PreviewIframe = ({ isSidebar = false, activeTab }) => {
         <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Live Preview</h3>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setPreviewMode('graphics')} className={`rounded-md px-2 py-1 text-[9px] font-bold uppercase tracking-wider ${previewMode === 'graphics' ? 'bg-blue-600 text-white' : 'control-button-muted'}`}>Graphics</button>
+          {showMonitors && (<>
           <button onClick={() => setPreviewMode('stage')} className={`rounded-md px-2 py-1 text-[9px] font-bold uppercase tracking-wider ${previewMode === 'stage' ? 'bg-indigo-600 text-white' : 'control-button-muted'}`}>Stage</button>
           <button onClick={() => setPreviewMode('backstage')} className={`rounded-md px-2 py-1 text-[9px] font-bold uppercase tracking-wider ${previewMode === 'backstage' ? 'bg-cyan-600 text-white' : 'control-button-muted'}`}>Backstage</button>
+          </>)}
           <button onClick={() => setIsPaused(prev => !prev)} className="control-button-muted flex h-7 w-7 items-center justify-center text-slate-500 transition hover:text-slate-900 dark:hover:text-white" title={isPaused ? 'Resume Preview' : 'Pause Preview'}>
             {isPaused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
           </button>
@@ -249,13 +274,58 @@ function App() {
   const [remoteAccessStatus, setRemoteAccessStatus] = useState(null);
   const [remoteAccessPending, setRemoteAccessPending] = useState(false);
   const [socket, setSocket] = useState(null);
-  const [activeTab, setActiveTab] = useState('runshow');
+  const [hiddenPages, setHiddenPages] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(HIDDEN_PAGES_KEY));
+      return Array.isArray(saved) ? saved : DEFAULT_HIDDEN_PAGES;
+    } catch { return DEFAULT_HIDDEN_PAGES; }
+  });
+  const [activeTab, setActiveTab] = useState(() => (hiddenPages.includes('runshow') ? 'media' : 'runshow'));
   // Latches true the first time the SuperSource tab is opened, so its lazy chunk is fetched on
   // demand and then stays mounted (preserving an in-progress layout across tab switches).
   const [hasVisitedSuperSource, setHasVisitedSuperSource] = useState(false);
   useEffect(() => {
     if (activeTab === 'supersource') setHasVisitedSuperSource(true);
   }, [activeTab]);
+  const [previewWidth, setPreviewWidth] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem(PREVIEW_WIDTH_KEY));
+      return clampPreviewWidth(saved > 0 ? saved : defaultPreviewWidth());
+    } catch { return defaultPreviewWidth(); }
+  });
+  const [isResizingPreview, setIsResizingPreview] = useState(false);
+  useEffect(() => {
+    try { localStorage.setItem(PREVIEW_WIDTH_KEY, String(previewWidth)); } catch { /* storage unavailable */ }
+  }, [previewWidth]);
+  // Keep the saved width sensible when the window itself is made smaller.
+  useEffect(() => {
+    const onResize = () => setPreviewWidth(width => clampPreviewWidth(width));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const startPreviewResize = (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = previewWidth;
+    setIsResizingPreview(true);
+    const onMove = (ev) => setPreviewWidth(clampPreviewWidth(startWidth + (startX - ev.clientX)));
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setIsResizingPreview(false);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+  const onPreviewHandleKey = (e) => {
+    const step = e.shiftKey ? 60 : 20;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); setPreviewWidth(w => clampPreviewWidth(w + step)); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); setPreviewWidth(w => clampPreviewWidth(w - step)); }
+  };
   const [navCollapsed, setNavCollapsed] = useState(() => {
     return localStorage.getItem('bc-nav-collapsed') === 'true';
   });
@@ -265,8 +335,10 @@ function App() {
   const [showParticleOverlayControls, setShowParticleOverlayControls] = useState(() => {
     return localStorage.getItem(SHOW_PARTICLE_OVERLAY_CONTROLS_KEY) === 'true';
   });
+  const [showMonitors, setShowMonitors] = useState(() => {
+    try { return localStorage.getItem(SHOW_MONITORS_KEY) === 'true'; } catch { return false; }
+  });
 
-  const isDesktop = useMediaQuery('(min-width: 1280px)'); // 1280px is 'xl' in Tailwind
 
   // Settings state
   const [displays, setDisplays] = useState([]);
@@ -321,10 +393,9 @@ function App() {
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const [clearUndo, setClearUndo] = useState(null);
-  const [isPreviewCollapsed, setIsPreviewCollapsed] = useState(false);
   const clearUndoTimerRef = useRef(null);
   const commandInputRef = useRef(null);
-  const [liveState, dispatchLiveState] = useReducer(liveStateReducer, {
+  const [, dispatchLiveState] = useReducer(liveStateReducer, {
     media: false,
     photo: false,
     lowerThird: false,
@@ -374,6 +445,22 @@ function App() {
   useEffect(() => {
     localStorage.setItem('bc-nav-collapsed', navCollapsed ? 'true' : 'false');
   }, [navCollapsed]);
+
+  // On a narrow window the page needs the room more than the labels do: shrink the sidebar
+  // to icons, and put back the operator's own choice when the window is widened again.
+  const isNarrowWindow = useMediaQuery('(max-width: 1099px)');
+  const navCollapsedRef = useRef(navCollapsed);
+  navCollapsedRef.current = navCollapsed;
+  const navBeforeNarrowRef = useRef(null);
+  useEffect(() => {
+    if (isNarrowWindow) {
+      navBeforeNarrowRef.current = navCollapsedRef.current;
+      setNavCollapsed(true);
+    } else if (navBeforeNarrowRef.current !== null) {
+      setNavCollapsed(navBeforeNarrowRef.current);
+      navBeforeNarrowRef.current = null;
+    }
+  }, [isNarrowWindow]);
 
   useEffect(() => {
     if (!socket) return undefined;
@@ -553,6 +640,16 @@ function App() {
   useEffect(() => {
     localStorage.setItem(SHOW_PARTICLE_OVERLAY_CONTROLS_KEY, showParticleOverlayControls ? 'true' : 'false');
   }, [showParticleOverlayControls]);
+
+  useEffect(() => {
+    try { localStorage.setItem(SHOW_MONITORS_KEY, showMonitors ? 'true' : 'false'); } catch { /* storage unavailable */ }
+    if (!showMonitors && (activeTab === 'stage' || activeTab === 'backstage')) setActiveTab('media');
+  }, [showMonitors, activeTab]);
+
+  useEffect(() => {
+    try { localStorage.setItem(HIDDEN_PAGES_KEY, JSON.stringify(hiddenPages)); } catch { /* storage unavailable */ }
+    if (hiddenPages.includes(activeTab)) setActiveTab('media');
+  }, [hiddenPages, activeTab]);
 
   useEffect(() => {
     if (socket) {
@@ -783,13 +880,13 @@ function App() {
   const selectedNdiSource = NDI_SOURCE_OPTIONS.find(option => option.id === ndiSourceType) || NDI_SOURCE_OPTIONS[0];
   const runningNdiSource = NDI_SOURCE_OPTIONS.find(option => option.id === ndiStatus.sourceType) || selectedNdiSource;
 
-  const activeLiveCount = useMemo(() => (
-    Object.values(liveState).filter(Boolean).length + (isGraphicsOpen ? 1 : 0) + (isStageOpen ? 1 : 0) + (ndiStatus.enabled ? 1 : 0)
-  ), [liveState, isGraphicsOpen, isStageOpen, ndiStatus.enabled]);
 
   const visibleTabGroups = useMemo(() => (
-    isRemoteClient ? TAB_GROUPS.filter(group => !group.localOnly) : TAB_GROUPS
-  ), [isRemoteClient]);
+    TAB_GROUPS
+      .filter(group => (!isRemoteClient || !group.localOnly) && (showMonitors || !group.monitors))
+      .map(group => ({ ...group, tabs: group.tabs.filter(tab => !hiddenPages.includes(tab.id)) }))
+      .filter(group => group.tabs.length > 0)
+  ), [isRemoteClient, showMonitors, hiddenPages]);
   const visibleTabs = useMemo(() => (
     visibleTabGroups.flatMap(group => group.tabs.map(tab => ({ ...tab, group: group.label })))
   ), [visibleTabGroups]);
@@ -806,14 +903,14 @@ function App() {
     ...tabCommands,
     { id: 'settings', label: 'Open Settings', detail: 'System configuration', keywords: 'settings output ndi display', action: () => setActiveTab('settings') },
     { id: 'graphics', label: isGraphicsOpen ? 'Close Graphics Output' : 'Open Graphics Output', detail: 'External graphics display', keywords: 'graphics output monitor display', action: () => (isGraphicsOpen ? handleCloseGraphics() : handleOpenGraphics()) },
-    { id: 'stage', label: isStageOpen ? 'Close Confidence Monitor' : 'Open Confidence Monitor', detail: 'Stage confidence display', keywords: 'stage confidence monitor output display', action: () => (isStageOpen ? handleCloseStage() : handleOpenStage()) },
-    { id: 'backstage', label: isBackstageOpen ? 'Close Backstage Monitor' : 'Open Backstage Monitor', detail: 'Backstage rundown display', keywords: 'backstage monitor cue sheet rundown output display', action: () => (isBackstageOpen ? handleCloseBackstage() : handleOpenBackstage()) },
+    ...(showMonitors ? [{ id: 'stage', label: isStageOpen ? 'Close Confidence Monitor' : 'Open Confidence Monitor', detail: 'Stage confidence display', keywords: 'stage confidence monitor output display', action: () => (isStageOpen ? handleCloseStage() : handleOpenStage()) },
+    { id: 'backstage', label: isBackstageOpen ? 'Close Backstage Monitor' : 'Open Backstage Monitor', detail: 'Backstage rundown display', keywords: 'backstage monitor cue sheet rundown output display', action: () => (isBackstageOpen ? handleCloseBackstage() : handleOpenBackstage()) }] : []),
     { id: 'ndi', label: ndiStatus.enabled ? 'Stop NDI Output' : 'Start NDI Output', detail: ndiStatus.sourceName || ndiSourceName, keywords: 'ndi output stream', action: handleNdiToggle },
     { id: 'clear', label: 'Clear All Outputs', detail: 'Undo available for 10 seconds', keywords: 'clear stop hide all', action: handleClearAll },
     { id: 'blackout', label: 'Blackout Output', detail: 'Set output black and clear live graphics', keywords: 'blackout black output clear', action: handleBlackout },
     ...(clearUndo ? [{ id: 'undo-clear', label: 'Undo Clear All', detail: 'Restore recently cleared output', keywords: 'undo restore clear', action: handleUndoClear }] : []),
     { id: 'theme', label: `Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Mode`, detail: 'Operator theme', keywords: 'theme light dark', action: toggleTheme },
-  ], [tabCommands, isGraphicsOpen, isStageOpen, isBackstageOpen, ndiStatus.enabled, ndiStatus.sourceName, ndiSourceName, clearUndo, theme, handleBlackout, handleClearAll, handleCloseGraphics, handleCloseStage, handleCloseBackstage, handleNdiToggle, handleOpenGraphics, handleOpenStage, handleOpenBackstage, handleUndoClear, toggleTheme]);
+  ], [tabCommands, showMonitors, isGraphicsOpen, isStageOpen, isBackstageOpen, ndiStatus.enabled, ndiStatus.sourceName, ndiSourceName, clearUndo, theme, handleBlackout, handleClearAll, handleCloseGraphics, handleCloseStage, handleCloseBackstage, handleNdiToggle, handleOpenGraphics, handleOpenStage, handleOpenBackstage, handleUndoClear, toggleTheme]);
 
   const filteredCommands = useMemo(() => commandItems.filter(item => {
     const q = commandQuery.trim().toLowerCase();
@@ -859,17 +956,7 @@ function App() {
               <div className="surface-raised p-px rounded-lg flex items-center justify-center shrink-0 overflow-hidden">
                 <img src="/logo.png" className="h-8 w-8 object-cover shrink-0 rounded-[7px]" alt="Broadcast Controller logo" />
               </div>
-              <div className="flex flex-col justify-center shrink-0">
-                <span className="text-slate-900 dark:text-white font-bold text-base leading-none tracking-wide">Broadcast</span>
-                <span className="text-blue-600 dark:text-blue-400 font-bold text-[0.6rem] leading-tight tracking-[0.25em] uppercase mt-1">Controller</span>
-              </div>
-              <div className="hidden xl:flex items-center gap-2 border-l section-rule pl-3">
-                <span className={`h-3 w-3 rounded-full ${activeLiveCount > 0 ? 'bg-emerald-500 animate-pulse shadow-[0_0_16px_rgba(16,185,129,0.7)]' : 'bg-slate-400'}`} />
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Operator State</div>
-                  <div className="text-xs font-bold text-slate-800 dark:text-slate-100">{activeLiveCount > 0 ? `${activeLiveCount} live signal${activeLiveCount === 1 ? '' : 's'}` : 'Standby'}</div>
-                </div>
-              </div>
+              <span className="hidden sm:inline text-sm font-semibold text-slate-900 dark:text-white">Broadcast Controller</span>
               {isRemoteClient && (
                 <div className="flex items-center gap-2 border-l section-rule pl-3">
                   <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
@@ -889,12 +976,11 @@ function App() {
             <div className="flex flex-wrap items-center justify-end gap-1.5 min-w-0">
               <button
                 onClick={() => setIsCommandOpen(true)}
-                className="control-button h-8 px-2 text-slate-600 dark:text-slate-300 flex items-center gap-2 text-xs font-bold"
-                title="Command Palette"
+                className="control-button w-8 h-8 text-slate-600 dark:text-slate-300 flex items-center justify-center"
+                title="Search & commands (⌘K)"
+                aria-label="Search and commands"
               >
                 <Command className="w-4 h-4" />
-                <span className="hidden sm:inline">Command</span>
-                <span className="hidden lg:inline text-[10px] text-slate-400 border section-rule rounded px-1.5 py-0.5">⌘K</span>
               </button>
               <button 
                 onClick={isGraphicsOpen ? handleCloseGraphics : handleOpenGraphics}
@@ -904,6 +990,7 @@ function App() {
                 <Monitor className="w-4 h-4" />
                 Graphics
               </button>
+              {showMonitors && (<>
               <button 
                 onClick={isStageOpen ? handleCloseStage : handleOpenStage}
                 className={`h-8 px-2 rounded-lg font-bold text-[10px] uppercase tracking-wider transition flex items-center gap-2 border ${isStageOpen ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-600/20' : 'control-button-muted hover:text-slate-800 dark:hover:text-white'}`}
@@ -920,6 +1007,7 @@ function App() {
                 <Monitor className="w-4 h-4" />
                 Backstage
               </button>
+              </>)}
               <button 
                 onClick={handleClearAll} 
                 className="h-8 px-2 rounded-lg bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-500/30 hover:border-red-600 transition active:scale-95 flex items-center gap-2 font-bold text-[10px] uppercase tracking-wider"
@@ -928,23 +1016,13 @@ function App() {
                 <X className="w-4 h-4" />
                 Clear
               </button>
-              <button onClick={toggleTheme} className="control-button w-8 h-8 text-slate-700 dark:text-slate-200 active:scale-95 flex items-center justify-center" title="Toggle Theme">
-                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-              </button>
               <button 
-                onClick={() => setActiveTab(activeTab === 'settings' ? 'runshow' : 'settings')} 
+                onClick={() => setActiveTab(activeTab === 'settings' ? 'media' : 'settings')} 
                 className={`w-8 h-8 rounded-lg transition active:scale-95 flex items-center justify-center border ${activeTab === 'settings' ? 'bg-blue-600 text-white border-blue-600' : 'control-button text-slate-700 dark:text-slate-200'}`}
                 title="Settings"
               >
                 <Settings className="w-4 h-4" />
               </button>
-              {!isRemoteClient && <button 
-                onClick={handleClearCache} 
-                className="control-button w-8 h-8 text-slate-500 dark:text-slate-400 hover:bg-red-600/20 hover:text-red-500 hover:border-red-500/50 flex items-center justify-center active:scale-95"
-                title="Clear All Cache / Factory Reset"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>}
             </div>
           </div>
 
@@ -1030,7 +1108,7 @@ function App() {
                         <button
                           key={tab.id}
                           onClick={() => setActiveTab(tab.id)}
-                          className={`w-full flex items-center rounded-md font-bold text-[11px] transition ${navCollapsed ? 'justify-center h-9' : 'gap-2.5 px-2.5 py-1.5'} ${
+                          className={`w-full flex items-center rounded-md font-medium text-[13px] transition ${navCollapsed ? 'justify-center h-9' : 'gap-2.5 px-2.5 py-1.5'} ${
                             isActive
                               ? 'bg-blue-600 text-white shadow-sm'
                               : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -1047,15 +1125,9 @@ function App() {
               ))}
             </nav>
           </aside>
-          <div className="flex-grow p-3 overflow-y-auto">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b section-rule pb-2">
-              <div className="min-w-0">
-                <div className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-500">Cue Workspace</div>
-                <div className="flex items-center gap-2 mt-0.5">
-                  <span className="text-lg font-bold text-slate-900 dark:text-white truncate">{activeTabInfo.label}</span>
-                  <span className="rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider">{activeTabInfo.cue}</span>
-                </div>
-              </div>
+          <div className="workspace flex-grow p-3 overflow-y-auto">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+              <h1 className="m-0 truncate text-lg font-semibold text-slate-900 dark:text-white">{activeTabInfo.label}</h1>
             </div>
             {/* Content Panels */}
             <div style={{ display: activeTab === 'runshow' ? 'block' : 'none' }}>
@@ -1107,6 +1179,7 @@ function App() {
                     </select>
                   </div>
 
+                  {showMonitors && (<>
                   <div className="surface space-y-3 p-3 rounded-lg">
                     <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Confidence Monitor</label>
                     <div className="flex space-x-2">
@@ -1130,6 +1203,7 @@ function App() {
                       {displays.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}
                     </select>
                   </div>
+                  </>)}
                 </div>
                 </section>
 
@@ -1459,6 +1533,60 @@ function App() {
                   </div>
                 </section>
 
+                <section id="settings-appearance" className="surface space-y-3 p-3 rounded-lg scroll-mt-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-800 dark:text-white uppercase tracking-wider">Appearance</h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Light or dark controls. Also in search (⌘K).</p>
+                    </div>
+                    <div className="surface-muted flex items-center gap-1 rounded-lg p-1">
+                      <button onClick={() => theme !== 'light' && toggleTheme()} className={`flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium ${theme === 'light' ? 'bg-indigo-600 text-white' : 'text-slate-600 dark:text-slate-300'}`}><Sun className="h-4 w-4" />Light</button>
+                      <button onClick={() => theme !== 'dark' && toggleTheme()} className={`flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium ${theme === 'dark' ? 'bg-indigo-600 text-white' : 'text-slate-600 dark:text-slate-300'}`}><Moon className="h-4 w-4" />Dark</button>
+                    </div>
+                  </div>
+                </section>
+
+                <section id="settings-pages" className="surface space-y-3 p-3 rounded-lg scroll-mt-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800 dark:text-white uppercase tracking-wider">Pages</h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Choose which pages appear in the sidebar.</p>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {HIDEABLE_PAGES.map(page => (
+                      <label key={page.id} className="flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-slate-500/10">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-indigo-600"
+                          checked={!hiddenPages.includes(page.id)}
+                          onChange={e => setHiddenPages(prev => e.target.checked ? prev.filter(id => id !== page.id) : [...prev, page.id])}
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-sm font-medium text-slate-800 dark:text-slate-100">{page.label}</span>
+                          <span className="block text-xs text-slate-500 dark:text-slate-400">{page.detail}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+
+                <section id="settings-monitors" className="surface space-y-3 p-3 rounded-lg scroll-mt-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-800 dark:text-white uppercase tracking-wider">Stage &amp; Backstage Monitors</h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Show the Confidence and Backstage monitor windows, pages and preview tabs. Leave off for a single-screen setup.</p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer" title="Show Stage and Backstage monitors">
+                      <input
+                        type="checkbox"
+                        className="sr-only peer"
+                        checked={showMonitors}
+                        onChange={event => setShowMonitors(event.target.checked)}
+                      />
+                      <div className="w-11 h-6 bg-slate-200 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                    </label>
+                  </div>
+                </section>
+
                 <section id="settings-translation" className="surface space-y-3 p-3 rounded-lg scroll-mt-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
@@ -1516,7 +1644,7 @@ function App() {
             <div style={{ display: activeTab === 'pres' ? 'block' : 'none' }}><PresentationPanel socket={socket} isActive={activeTab === 'pres'} /></div>
             <div style={{ display: activeTab === 'lyrics' ? 'block' : 'none' }}><LyricsPanel socket={socket} /></div>
             <div style={{ display: activeTab === 'lt' ? 'block' : 'none' }}><LowerThirdsPanel socket={socket} /></div>
-            <div style={{ display: activeTab === 'media' ? 'block' : 'none' }}><MediaPanel socket={socket} showParticleOverlayControls={showParticleOverlayControls} /></div>
+            <div style={{ display: activeTab === 'media' ? 'block' : 'none' }}><MediaPanel socket={socket} showParticleOverlayControls={showParticleOverlayControls} isActive={activeTab === 'media'} /></div>
             <div style={{ display: activeTab === 'stage' ? 'block' : 'none' }}><StageDisplayPanel socket={socket} /></div>
             <div style={{ display: activeTab === 'backstage' ? 'block' : 'none' }}>
               <BackstageCueSheetPanel
@@ -1538,28 +1666,33 @@ function App() {
               </div>
             )}
 
-            {/* Bottom Preview - ONLY RENDER IF NOT DESKTOP */}
-            {!isRemoteClient && !isDesktop && (
-              <div className="mt-8 pt-6 border-t section-rule">
-                <PreviewIframe isSidebar={false} activeTab={activeTab} />
-              </div>
-            )}
           </div>
 
-          {/* Sidebar Preview - ONLY RENDER IF DESKTOP */}
-          {!isRemoteClient && isDesktop && (
-            <div className={`${isPreviewCollapsed ? 'w-12' : 'w-[360px] 2xl:w-[420px]'} surface-muted flex-none border-y-0 border-r-0 transition-all duration-300 overflow-hidden`}>
-              <div className="sticky top-0 p-3">
-                <button
-                  onClick={() => setIsPreviewCollapsed(prev => !prev)}
-                  className="control-button w-full mb-3 h-9 text-slate-500 hover:text-slate-900 dark:hover:text-white flex items-center justify-center gap-2 text-[10px] font-bold uppercase tracking-wider"
-                  aria-label={isPreviewCollapsed ? 'Show Live Preview' : 'Collapse Preview'}
-                  title={isPreviewCollapsed ? 'Show Live Preview' : 'Collapse Preview'}
-                >
-                  {isPreviewCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                  {!isPreviewCollapsed && 'Collapse Preview'}
-                </button>
-                {!isPreviewCollapsed && <PreviewIframe isSidebar={true} activeTab={activeTab} />}
+          {/* Live Preview — the operator's source of truth, so it is ALWAYS pinned on the
+              right at every window size and cannot be collapsed. It used to drop to the bottom
+              of the scrolling page below 1280px wide, where it scrolled out of sight. */}
+          {!isRemoteClient && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize preview column"
+              aria-valuenow={previewWidth}
+              tabIndex={0}
+              title="Drag to resize · double-click to reset"
+              onPointerDown={startPreviewResize}
+              onDoubleClick={() => setPreviewWidth(clampPreviewWidth(defaultPreviewWidth()))}
+              onKeyDown={onPreviewHandleKey}
+              className="group relative w-1.5 flex-none cursor-col-resize focus:outline-none"
+            >
+              <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 transition-all ${isResizingPreview ? 'w-1 bg-indigo-500' : 'w-px bg-transparent group-hover:w-1 group-hover:bg-indigo-500/70 group-focus-visible:w-1 group-focus-visible:bg-indigo-500'}`} />
+            </div>
+          )}
+          {!isRemoteClient && (
+            <div className="preview-rail surface-muted flex-none border-y-0 border-r-0 overflow-y-auto" style={{ width: previewWidth }}>
+              <div className="p-3">
+                <PreviewIframe isSidebar={true} activeTab={activeTab} showMonitors={showMonitors} />
+                {/* Media player controls dock here (portal from MediaPanel). */}
+                <div id="bc-media-dock" className="mt-3" />
               </div>
             </div>
           )}
