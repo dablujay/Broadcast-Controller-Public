@@ -102,17 +102,20 @@
     --bc-text-muted: #746c5f;
   }
 
+  /* Dark theme: cool neutrals that match the slate text and blue accents used throughout,
+     with clear steps between page, panel and raised surfaces. (The old warm-brown greys
+     clashed with the cool text colours and made panels blend into the page.) */
   .dark {
-    --bc-app-bg: #0d0d0c;
-    --bc-shell-bg: #181715;
-    --bc-surface: #22201d;
-    --bc-surface-muted: #151412;
-    --bc-surface-raised: #282520;
-    --bc-field-bg: #10100f;
-    --bc-border: #4a443a;
-    --bc-border-soft: #383329;
-    --bc-text: #fbf7ef;
-    --bc-text-muted: #b7aa98;
+    --bc-app-bg: #090b10;
+    --bc-shell-bg: #0f1218;
+    --bc-surface: #171b24;
+    --bc-surface-muted: #12151c;
+    --bc-surface-raised: #1d222d;
+    --bc-field-bg: #0b0e14;
+    --bc-border: #2f3746;
+    --bc-border-soft: #252c39;
+    --bc-text: #eef1f6;
+    --bc-text-muted: #a8b1c0;
   }
 
   body { 
@@ -335,5 +338,97 @@
     padding-bottom: 86.4px !important;
     padding-top: 108px !important;
     background: transparent !important;
+  }
+}
+
+/* ---- Legibility for the control UI (not the on-air graphics) ---------------------------- */
+@layer utilities {
+  /* The smallest labels were 8-10px; nudge them up a step so they read at a glance. */
+  .app-shell .text-\[8px\] { font-size: 9.5px; }
+  .app-shell .text-\[9px\] { font-size: 10.5px; }
+  .app-shell .text-\[10px\] { font-size: 11px; }
+
+  /* Dark mode: the grey and accent text shades chosen for light backgrounds are too faint on
+     dark ones. Lift them to readable contrast. `:not(:hover)` leaves hover colours (e.g. a red
+     button turning white-on-red) to the component's own classes. */
+  .dark .text-slate-600:not(:hover) { color: #cbd5e1; }
+  .dark .text-slate-500:not(:hover) { color: #9ba7b8; }
+  .dark .text-slate-400:not(:hover) { color: #b3bdcb; }
+  .dark .text-red-600:not(:hover),
+  .dark .text-red-500:not(:hover) { color: #f87171; }
+  .dark .text-emerald-600:not(:hover) { color: #34d399; }
+  .dark .text-indigo-600:not(:hover) { color: #a5b4fc; }
+  .dark .text-amber-600:not(:hover) { color: #fbbf24; }
+  .dark .text-cyan-600:not(:hover) { color: #22d3ee; }
+  .dark .text-purple-600:not(:hover) { color: #c084fc; }
+}
+
+/* ---- Calmer UI: fewer boxes, plainer type (control window only) ----------------------------
+   The panels were built as cards inside cards with spaced-out ALL-CAPS labels everywhere. This
+   layer quiets that centrally instead of rewriting every panel:
+   - a page's top-level sections drop their card frame and are separated by space + a hairline;
+   - a box inside another box goes flat;
+   - headings, labels and buttons use normal case and spacing instead of tracked capitals. */
+@layer utilities {
+  .workspace .surface:not(:is(.surface, .surface-muted, .surface-raised) .surface) {
+    background: transparent;
+    border-width: 1px 0 0 0;
+    border-color: var(--bc-border-soft);
+    border-radius: 0;
+    box-shadow: none;
+    padding-left: 0;
+    padding-right: 0;
+    padding-top: 1rem;
+  }
+  .workspace :is(.surface, .surface-muted, .surface-raised) :is(.surface, .surface-muted) {
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+  }
+  .workspace .surface-muted:not(:is(.surface, .surface-muted, .surface-raised) .surface-muted) {
+    border-color: transparent;
+  }
+
+  .app-shell :is(h1, h2, h3, h4, h5, label, legend, p, span, div, button, a).uppercase {
+    text-transform: none;
+    letter-spacing: normal;
+  }
+  /* Section titles were 10px tracked capitals; as normal text they need real heading size. */
+  .workspace :is(h2, h3).uppercase {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--bc-text);
+  }
+  /* Live Preview rail: its blocks are separated by a hairline, not boxed. */
+  .preview-rail .surface {
+    background: transparent;
+    border-width: 0 0 1px 0;
+    border-color: var(--bc-border-soft);
+    border-radius: 0;
+    box-shadow: none;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .workspace h4.uppercase {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--bc-text);
+  }
+}
+
+/* Media library cards: a clearly raised card in both themes, so thumbnails don't sink into the page. */
+@layer utilities {
+  .media-card {
+    background: var(--bc-surface-raised);
+    border: 1px solid var(--bc-border);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 12px rgba(15, 23, 42, 0.06);
+  }
+  .dark .media-card {
+    background: #202633;
+    border-color: #363f50;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  }
+  .media-card:hover {
+    border-color: #6366f1;
   }
 }

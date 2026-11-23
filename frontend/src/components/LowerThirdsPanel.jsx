@@ -102,11 +102,11 @@ async function transliterateGujarati(text) {
 const SectionHeader = ({ icon: Icon, title, detail, action }) => (
     <div className="flex items-center justify-between gap-3">
         <div>
-            <h3 className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
-                {Icon && <Icon className="w-3.5 h-3.5 text-indigo-400" />}
+            {/* The explanatory line is a hover tooltip, not body text, to keep the page quiet. */}
+            <h3 title={detail || undefined} className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                {Icon && <Icon className="w-3.5 h-3.5 text-slate-400" />}
                 {title}
             </h3>
-            {detail && <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-500">{detail}</p>}
         </div>
         {action}
     </div>
@@ -138,6 +138,13 @@ export default function LowerThirdsPanel({ socket }) {
     const [templateNameInput, setTemplateNameInput] = useState('');
     const [templateSaveState, setTemplateSaveState] = useState('idle');
     const [liveLowerThird, setLiveLowerThird] = useState(null);
+    // Language and logo settings change rarely, so they sit behind "More options".
+    const [showMoreOptions, setShowMoreOptions] = useState(() => {
+        try { return localStorage.getItem('bc-lt-more-options') === 'true'; } catch { return false; }
+    });
+    useEffect(() => {
+        try { localStorage.setItem('bc-lt-more-options', showMoreOptions ? 'true' : 'false'); } catch { /* storage unavailable */ }
+    }, [showMoreOptions]);
 
     const titleInputRef = useRef(null);
     const crossSyncTimerRef = useRef(null);
@@ -147,7 +154,6 @@ export default function LowerThirdsPanel({ socket }) {
     const currentStyle = useMemo(() => getStyleFromDraft(draft), [draft]);
     const currentDesign = useMemo(() => getDesignFromDraft(draft), [draft]);
     const selectedAnimation = ANIMATION_PRESETS.find(animation => animation.id === behavior.animation);
-    const selectedShape = SHAPE_PRESETS.find(shape => shape.id === appearance.shapeStyle);
     const selectedBackground = BACKGROUND_STYLES.find(bg => bg.id === appearance.bgStyle);
 
     const updateSection = useCallback((section, values) => {
@@ -370,7 +376,7 @@ export default function LowerThirdsPanel({ socket }) {
                 action={(
                     <button onClick={showNextCue} disabled={cueQueue.length === 0 || activeCueIndex >= cueQueue.length - 1} className="text-[10px] px-3 py-1 rounded-lg font-bold transition flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 text-white">
                         <Play className="w-3 h-3" />
-                        NEXT CUE
+                        Next Cue
                     </button>
                 )}
             />
@@ -421,12 +427,6 @@ export default function LowerThirdsPanel({ socket }) {
                                         On Air
                                     </span>
                                 )}
-                                <span className="hidden md:inline-flex text-[10px] font-bold text-slate-500 uppercase tracking-wider border section-rule rounded-lg px-2 py-1">
-                                    {selectedShape?.label || appearance.shapeStyle}
-                                </span>
-                                <span className="hidden md:inline-flex text-[10px] font-bold text-slate-500 uppercase tracking-wider border section-rule rounded-lg px-2 py-1">
-                                    {selectedAnimation?.label || behavior.animation}
-                                </span>
                             </div>
                         )}
                     />
@@ -463,7 +463,20 @@ export default function LowerThirdsPanel({ socket }) {
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                            <div className="flex flex-wrap items-end gap-3">
+                                <div className="w-40 space-y-1.5">
+                                    <FieldLabel>Auto Clear</FieldLabel>
+                                    <input type="number" value={behavior.autoClear} onChange={e => updateSection('behavior', { autoClear: e.target.value })} placeholder="Manual" min="0" className={inputClass} />
+                                </div>
+                                <button type="button" onClick={() => setShowMoreOptions(v => !v)} aria-expanded={showMoreOptions}
+                                    className="h-10 rounded-lg px-3 text-sm font-medium text-slate-600 transition hover:bg-slate-500/10 dark:text-slate-300">
+                                    {showMoreOptions ? 'Fewer options ▴' : 'More options ▾'}
+                                </button>
+                            </div>
+
+                            {showMoreOptions && (
+                                <div className="space-y-3">
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                                 <div className="space-y-1.5">
                                     <FieldLabel>Language Mode</FieldLabel>
                                     <select value={behavior.langOpt} onChange={e => updateSection('behavior', { langOpt: e.target.value })} className={inputClass}>
@@ -472,12 +485,6 @@ export default function LowerThirdsPanel({ socket }) {
                                         <option value="guj">Gujarati Only</option>
                                     </select>
                                 </div>
-                                <div className="space-y-1.5">
-                                    <FieldLabel>Auto Clear</FieldLabel>
-                                    <input type="number" value={behavior.autoClear} onChange={e => updateSection('behavior', { autoClear: e.target.value })} placeholder="Manual" min="0" className={inputClass} />
-                                </div>
-                                {/* Logo placement and size sit with the upload below — they used to
-                                    be buried in two different design cards. */}
                                 <div className="space-y-1.5">
                                     <FieldLabel>Logo Placement</FieldLabel>
                                     <select value={layout.logoPlacement} onChange={e => updateSection('layout', { logoPlacement: e.target.value })} className={inputClass}>
@@ -491,8 +498,7 @@ export default function LowerThirdsPanel({ socket }) {
                                     <FieldLabel>Logo Size</FieldLabel>
                                     <input type="number" min="60" max="260" value={layout.logoSize} onChange={e => updateSection('layout', { logoSize: Number(e.target.value) })} className={inputClass} />
                                 </div>
-                            </div>
-
+                                    </div>
                             <div className="space-y-1.5">
                                 <FieldLabel>Logo Image</FieldLabel>
                                 <div className="flex items-center gap-2">
@@ -500,21 +506,23 @@ export default function LowerThirdsPanel({ socket }) {
                                         className="min-w-0 flex-1 text-xs text-slate-600 dark:text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-600 file:text-white hover:file:bg-blue-700" />
                                     {content.logo && (
                                         <button onClick={() => updateSection('content', { logo: null })} className="px-3 py-2 rounded-lg text-[10px] font-bold bg-red-600/10 text-red-600 border border-red-600/20">
-                                            REMOVE
+                                            Remove
                                         </button>
                                     )}
                                 </div>
                             </div>
+                                </div>
+                            )}
 
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                                 <button onClick={handleShow} className={`col-span-2 text-white px-4 py-3 rounded-xl font-bold shadow-lg transition active:scale-95 ${liveLowerThird ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/20'}`}>
-                                    {liveLowerThird ? 'UPDATE LIVE' : 'TAKE LIVE'}
+                                    {liveLowerThird ? 'Update Live' : 'Take Live'}
                                 </button>
                                 <button onClick={addCurrentToCueQueue} className="control-button-muted text-slate-700 dark:text-slate-200 px-3 py-3 rounded-lg font-bold text-xs active:scale-95">
-                                    ADD TO QUEUE
+                                    Add to Queue
                                 </button>
                                 <button onClick={handleHide} className="bg-red-600/10 hover:bg-red-600 text-red-600 hover:text-white border border-red-600/20 px-3 py-3 rounded-xl font-bold text-xs transition active:scale-95">
-                                    CLEAR
+                                    Clear
                                 </button>
                             </div>
                         </div>
@@ -583,7 +591,7 @@ export default function LowerThirdsPanel({ socket }) {
                                 : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-300 border-amber-500/30'
                         }`}>
                         <Save className="w-3 h-3" />
-                        {templateSaveState === 'saved' ? 'SAVED' : 'SAVE DESIGN'}
+                        {templateSaveState === 'saved' ? 'Saved' : 'Save Design'}
                     </button>
                 </div>
                 <div className="mt-3 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2">

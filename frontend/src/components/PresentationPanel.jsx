@@ -1070,7 +1070,7 @@ export default function PresentationPanel({ socket, isActive }) {
                     <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end gap-3">
                         <div>
                             <h4 className="text-md font-medium text-emerald-500">Arrange Slides</h4>
-                            <p className="text-xs text-slate-500">Drag, reorder, remove, then load the arranged deck into preview.</p>
+                            
                         </div>
                         <div className="flex items-center gap-3">
                             <button onClick={cancelStaging} className="text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white text-sm font-medium transition">Cancel</button>

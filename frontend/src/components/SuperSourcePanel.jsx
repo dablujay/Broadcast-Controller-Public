@@ -59,11 +59,11 @@ function docReducer(state, action) {
 const SectionHeader = ({ icon: Icon, title, detail, action }) => (
     <div className="flex items-center justify-between gap-3">
         <div>
-            <h3 className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
-                {Icon && <Icon className="w-3.5 h-3.5 text-indigo-400" />}
+            {/* The explanatory line is a hover tooltip, not body text, to keep the page quiet. */}
+            <h3 title={detail || undefined} className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                {Icon && <Icon className="w-3.5 h-3.5 text-slate-400" />}
                 {title}
             </h3>
-            {detail && <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-500">{detail}</p>}
         </div>
         {action}
     </div>

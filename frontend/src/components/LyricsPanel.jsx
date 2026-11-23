@@ -26,6 +26,12 @@ export default function LyricsPanel({ socket }) {
     const [animStyle, setAnimStyle] = useState('fade');
     const [bgStyle, setBgStyle] = useState('default');
     const [langOpt, setLangOpt] = useState('both');
+    const [showLookSettings, setShowLookSettings] = useState(() => {
+        try { return localStorage.getItem('bc-lyrics-look-open') === 'true'; } catch { return false; }
+    });
+    useEffect(() => {
+        try { localStorage.setItem('bc-lyrics-look-open', showLookSettings ? 'true' : 'false'); } catch { /* storage unavailable */ }
+    }, [showLookSettings]);
     const [autoClear, setAutoClear] = useState('');
     
     // Typography State
@@ -711,7 +717,13 @@ export default function LyricsPanel({ socket }) {
                 </div>
 
                 <div className="surface rounded-lg p-3">
-                    <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-3">Look / Timing</h3>
+                    {/* Style settings are set once and rarely touched mid-service, so they start folded away. */}
+                    <button type="button" onClick={() => setShowLookSettings(v => !v)} aria-expanded={showLookSettings}
+                        className="flex w-full items-center justify-between text-left">
+                        <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em]">Look / Timing</h3>
+                        <span className="text-sm text-slate-500">{showLookSettings ? 'Hide ▴' : 'Show ▾'}</span>
+                    </button>
+                    {showLookSettings && (<div className="mt-3">
                 <div className="grid grid-cols-2 gap-3 mb-3">
                     <div className="space-y-1.5">
                         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Show Languages</label>
@@ -907,6 +919,7 @@ export default function LyricsPanel({ socket }) {
                     </div>
                 </div>
 
+                    </div>)}
                 </div>
             </div>
         </div>
