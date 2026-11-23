@@ -1316,13 +1316,13 @@ test('output_mode_update sets fitMode independently and rejects invalid values',
     const filledState = await filled;
     assert.equal(filledState.fitMode, 'fill');
     // Setting fitMode alone must not disturb backgroundMode, which the client never sent here.
-    assert.equal(filledState.backgroundMode, 'green');
+    assert.equal(filledState.backgroundMode, 'black');
 
     // A follow-up update for the *other* field must not undo the fitMode just set.
-    const recoloured = waitFor(operator, 'output_mode_update', { predicate: data => data?.backgroundMode === 'black' });
-    operator.emit('output_mode_update', { backgroundMode: 'black' });
+    const recoloured = waitFor(operator, 'output_mode_update', { predicate: data => data?.backgroundMode === 'green' });
+    operator.emit('output_mode_update', { backgroundMode: 'green' });
     const recolouredState = await recoloured;
-    assert.equal(recolouredState.backgroundMode, 'black');
+    assert.equal(recolouredState.backgroundMode, 'green');
     assert.equal(recolouredState.fitMode, 'fill', 'an unrelated field update must not reset fitMode');
 
     // An invalid fitMode is ignored -- preserves whatever was already set rather than
@@ -1513,7 +1513,7 @@ test('emits normalized operator state for live outputs and clear flow', async ()
     });
     operator.emit('clear_all');
     const cleared = await clearSeen;
-    assert.equal(cleared.outputMode.backgroundMode, 'green');
+    assert.equal(cleared.outputMode.backgroundMode, 'black');
 });
 
 test('tracks stage timer update, pause, resume, stop, and cached request replay', async () => {

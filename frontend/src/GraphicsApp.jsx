@@ -25,7 +25,7 @@ export default function GraphicsApp() {
     const [activeKeyColor, setActiveKeyColor] = useState('#00FF00');
     const [backgroundMode, setBackgroundMode] = useState(() => {
         const params = new URLSearchParams(window.location.search);
-        return params.get('backgroundMode') || 'green';
+        return params.get('backgroundMode') || 'black';
     });
     const [fitMode, setFitMode] = useState(() => {
         const params = new URLSearchParams(window.location.search);

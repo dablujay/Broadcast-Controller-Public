@@ -280,7 +280,15 @@ function App() {
     return localStorage.getItem('bc-backstage-display') || '';
   });
   const [outputMode, setOutputMode] = useState(() => {
-    return localStorage.getItem('bc-output-background-mode') || 'green';
+    // Black is now the default. Earlier versions saved green on first launch whether or not the
+    // operator ever chose it, so move existing setups to black once; picking green after this sticks.
+    try {
+      if (!localStorage.getItem('bc-output-default-black-v1')) {
+        localStorage.setItem('bc-output-default-black-v1', '1');
+        localStorage.setItem('bc-output-background-mode', 'black');
+      }
+    } catch { /* storage unavailable */ }
+    return localStorage.getItem('bc-output-background-mode') || 'black';
   });
   const [fitMode, setFitMode] = useState(() => {
     return localStorage.getItem('bc-output-fit-mode') === 'fill' ? 'fill' : 'fit';

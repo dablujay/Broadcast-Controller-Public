@@ -1914,7 +1914,9 @@ let currentPhotoData = null;
 // literals (the sabha style block appeared twice, 12 lines each), so any new field had to be
 // added in both places or tests would silently leak state between cases.
 const DEFAULT_PARTICLES_STATE = Object.freeze({ enabled: false, type: 'dust', intensity: 50, speed: 50 });
-const DEFAULT_OUTPUT_MODE = Object.freeze({ backgroundMode: 'green', fitMode: 'fit' });
+// Black by default: a plain TV/projector shows black as nothing. Green is for chroma keying
+// and is one click away in Settings.
+const DEFAULT_OUTPUT_MODE = Object.freeze({ backgroundMode: 'black', fitMode: 'fit' });
 const DEFAULT_LAYER_VISIBILITY = Object.freeze({
     presentation: true,
     media: true,
@@ -2843,7 +2845,7 @@ io.on('connection', (socket) => {
         const allowedFitModes = new Set(['fit', 'fill']);
         const backgroundMode = allowedModes.has(data?.backgroundMode)
             ? data.backgroundMode
-            : (currentOutputMode.backgroundMode || 'green');
+            : (currentOutputMode.backgroundMode || DEFAULT_OUTPUT_MODE.backgroundMode);
         const fitMode = allowedFitModes.has(data?.fitMode)
             ? data.fitMode
             : (currentOutputMode.fitMode || 'fit');
